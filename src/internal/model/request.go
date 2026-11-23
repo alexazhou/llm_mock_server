@@ -23,6 +23,8 @@ type RequestContext struct {
 	Header http.Header
 	Query  url.Values
 
+	// Parsed 表示协议解析已成功；为 false 时 OutputCount 无意义，不进诊断。
+	Parsed bool
 	// Model / Stream 来自协议解析器。
 	Model  string
 	Stream bool

@@ -63,12 +63,16 @@ func MatchOutput(ctx *model.RequestContext, round *CompiledRound) (*CompiledOutp
 	return nil, results, ferr
 }
 
-// BaseDetails 汇总 B 阶段错误的公共诊断字段。request_count 只在已分配后出现。
+// BaseDetails 汇总 B 阶段错误的公共诊断字段。
+// output_count 只在协议解析成功后出现，round_index 只在 round 定位成功后出现，
+// request_count 只在已分配后出现——避免把「未知」写成 0 误导验收。
 func BaseDetails(ctx *model.RequestContext) map[string]any {
 	details := map[string]any{
-		"script_id":    ctx.ScriptID,
-		"protocol":     ctx.Protocol,
-		"output_count": ctx.OutputCount,
+		"script_id": ctx.ScriptID,
+		"protocol":  ctx.Protocol,
+	}
+	if ctx.Parsed {
+		details["output_count"] = ctx.OutputCount
 	}
 	if ctx.RoundIndex > 0 {
 		details["round_index"] = ctx.RoundIndex

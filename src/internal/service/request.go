@@ -99,6 +99,7 @@ func (e *Executor) Execute(w http.ResponseWriter, r *http.Request, scriptID, pro
 	ctx.JSONBody = parsed.JSONBody
 	ctx.Model = parsed.Model
 	ctx.Stream = parsed.Stream
+	ctx.Parsed = true
 	ctx.OutputCount = parsed.OutputCount
 	ctx.RoundInput = parsed.RoundInput
 
