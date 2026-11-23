@@ -15,6 +15,9 @@ import (
 type UsageNumber struct {
 	Literal int64
 	Ref     *SystemKey
+	// Fallback 是外层（剧本 config.usage / server 默认）已解析出的字面值：
+	// output.config.usage 用系统 key 引用时不支持 default，键缺失即回退到外层。
+	Fallback *int64
 }
 
 // Dynamic 表示该字段需要在 prepare 阶段读取系统 key。
@@ -146,14 +149,14 @@ func applyStaticUsage(usage *EffectiveUsage, cfg *model.Usage) {
 // applyDynamicUsage 应用 output.config.usage：四个数字字段都允许系统 key 引用。
 func applyDynamicUsage(usage *EffectiveUsage, cfg *model.UsageOverride) error {
 	fields := []struct {
-		name  string
-		raw   *model.Value
-		apply func(UsageNumber)
+		name string
+		raw  *model.Value
+		slot func() *UsageNumber
 	}{
-		{"input_tokens", cfg.InputTokens, func(n UsageNumber) { usage.InputTokens = n }},
-		{"output_tokens", cfg.OutputTokens, func(n UsageNumber) { usage.OutputTokens = n }},
-		{"cached_input_tokens", cfg.CachedInputTokens, func(n UsageNumber) { usage.CachedInputTokens = n }},
-		{"reasoning_tokens", cfg.ReasoningTokens, func(n UsageNumber) { usage.ReasoningTokens = n }},
+		{"input_tokens", cfg.InputTokens, func() *UsageNumber { return &usage.InputTokens }},
+		{"output_tokens", cfg.OutputTokens, func() *UsageNumber { return &usage.OutputTokens }},
+		{"cached_input_tokens", cfg.CachedInputTokens, func() *UsageNumber { return &usage.CachedInputTokens }},
+		{"reasoning_tokens", cfg.ReasoningTokens, func() *UsageNumber { return &usage.ReasoningTokens }},
 	}
 	for _, field := range fields {
 		if field.raw == nil {
@@ -163,7 +166,13 @@ func applyDynamicUsage(usage *EffectiveUsage, cfg *model.UsageOverride) error {
 		if err != nil {
 			return err
 		}
-		field.apply(number)
+		if number.Ref != nil {
+			// 外层永远是静态字面量（剧本 config.usage 或 server 默认），
+			// 运行期键缺失时回退到它。
+			outer := *field.slot()
+			number.Fallback = &outer.Literal
+		}
+		*field.slot() = number
 	}
 	return nil
 }

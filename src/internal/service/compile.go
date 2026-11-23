@@ -38,6 +38,13 @@ type CompiledOutput struct {
 	Effective *EffectiveConfig
 	// Steps 是编译后的默认过程或显式 steps。
 	Steps []CompiledStep
+	// Content / Reasoning 是文本输出声明（nil 表示该字段未配置）。
+	Content   *CompiledText
+	Reasoning *CompiledText
+	// ToolCalls 是工具调用声明，Arguments 已按 JSON 结构编译。
+	ToolCalls []CompiledToolCall
+	// Error 是协议错误声明（nil 表示正常输出）。
+	Error *CompiledError
 }
 
 // CompileScript 编译一个剧本的全部断言与条件；失败时返回带文件与节点的错误，

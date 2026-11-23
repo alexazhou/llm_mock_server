@@ -64,6 +64,57 @@ func compileOneOutput(candidate *CompiledOutput, compiled *CompiledScript, base 
 	}
 	candidate.Effective = effective
 	candidate.Steps = steps
+	if err := compileOutputValues(candidate, base, path, file); err != nil {
+		return err
+	}
+	return nil
+}
+
+// compileOutputValues 编译「输出什么」：content / reasoning / tool_calls / error。
+// 只做加载期能判定的部分（系统 key 语法、arguments 结构与 JSON 可表达性、
+// tool 名与 id 的静态约束）；动态值的类型、长度与协议上限留到 prepare 阶段。
+func compileOutputValues(candidate *CompiledOutput, base *yaml.Node, path, file string) error {
+	out := candidate.Output
+	content, err := CompileTextValue(out.Content)
+	if err != nil {
+		return utils.NewPositionError(file, firstNonNil(utils.Lookup(base, "content"), base),
+			path+".content", err.Error())
+	}
+	reasoning, err := CompileTextValue(out.Reasoning)
+	if err != nil {
+		return utils.NewPositionError(file, firstNonNil(utils.Lookup(base, "reasoning"), base),
+			path+".reasoning", err.Error())
+	}
+	calls := make([]CompiledToolCall, 0, len(out.ToolCalls))
+	for k := range out.ToolCalls {
+		raw := out.ToolCalls[k]
+		call := CompiledToolCall{ID: raw.ID, Name: raw.Name}
+		arguments, err := CompileOutputValue("arguments", raw.Arguments.Node)
+		if err != nil {
+			return utils.NewPositionError(file, firstNonNil(utils.Lookup(base, "tool_calls", k, "arguments"), base),
+				fmt.Sprintf("%s.tool_calls[%d]", path, k), err.Error())
+		}
+		call.Arguments = arguments
+		calls = append(calls, call)
+	}
+	var protoErr *CompiledError
+	if out.Error != nil {
+		message, err := CompileTextValue(out.Error.Message)
+		if err != nil {
+			return utils.NewPositionError(file, firstNonNil(utils.Lookup(base, "error", "message"), base),
+				path+".error.message", err.Error())
+		}
+		param, err := CompileTextValue(out.Error.Param)
+		if err != nil {
+			return utils.NewPositionError(file, firstNonNil(utils.Lookup(base, "error", "param"), base),
+				path+".error.param", err.Error())
+		}
+		protoErr = &CompiledError{Type: out.Error.Type, Code: out.Error.Code, Message: message, Param: param}
+	}
+	candidate.Content = content
+	candidate.Reasoning = reasoning
+	candidate.ToolCalls = calls
+	candidate.Error = protoErr
 	return nil
 }
 
