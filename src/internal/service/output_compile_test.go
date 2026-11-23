@@ -104,6 +104,34 @@ rounds:
 		}
 	})
 
+	// C6-07 / C6-08 是两条对称判据：软链逃逸必须拒，指向剧本目录内普通文件的软链必须允许。
+	t.Run("symlink inside is allowed", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "scripts"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "server.yaml"), []byte("version: 1\nscripts_dir: scripts\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "scripts", "target.bin"), []byte("ok\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(root, "scripts", "target.bin"), filepath.Join(root, "scripts", "link.bin")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "scripts", "rawout.yaml"), []byte(scriptWith("link.bin")), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := Load(filepath.Join(root, "server.yaml"))
+		if err != nil {
+			t.Fatalf("symlink pointing to a regular file inside the script dir must be accepted: %v", err)
+		}
+		steps := loaded.Compiled["rawout"].Rounds[0].Outputs[0].Steps
+		if string(steps[0].Raw) != "ok\n" {
+			t.Fatalf("fixture bytes not loaded through the symlink: %q", steps[0].Raw)
+		}
+	})
+
 	rejected := []struct {
 		name    string
 		fixture string
