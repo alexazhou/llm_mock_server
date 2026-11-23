@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"errors"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -19,6 +21,8 @@ const (
 	opCommit opKind = iota
 	opSleep
 	opWrite
+	// opAbort 用 Hijack + SetLinger(0) 强制断连（TCP RST）。
+	opAbort
 )
 
 // writeOp 是规划出的一步传输操作。
@@ -76,6 +80,8 @@ func (w *responseWriter) run(ctx context.Context, prepared *PreparedOutput) erro
 			if err := sleep(ctx, op); err != nil {
 				return err
 			}
+		case opAbort:
+			return w.abortConnection()
 		case opCommit:
 			w.commitHeaders()
 		case opWrite:
@@ -109,6 +115,9 @@ func (w *responseWriter) runStream(ctx context.Context, prepared *PreparedOutput
 				return err
 			}
 		case OpEnd:
+			if step.Mode == EndModeAbort {
+				return w.abortConnection()
+			}
 			w.commitStreamHeaders()
 			if w.flusher != nil {
 				w.flusher.Flush()
@@ -124,18 +133,17 @@ func (w *responseWriter) runStream(ctx context.Context, prepared *PreparedOutput
 			}
 			switch step.Source {
 			case SourceRaw:
-				if err := w.writeStreamBytes(step.Raw); err != nil {
+				if err := w.sendStreamUnits(ctx, step, [][]byte{step.Raw}); err != nil {
 					return err
 				}
 			case SourceHeartbeat:
-				if err := w.writeStreamBytes(heartbeatBytes(step, lineEndingBytes(prepared.LineEnding))); err != nil {
+				payload := heartbeatBytes(step, lineEndingBytes(prepared.LineEnding))
+				if err := w.sendStreamUnits(ctx, step, [][]byte{payload}); err != nil {
 					return err
 				}
 			case SourceError:
-				for _, record := range writer.streamErrorRecords() {
-					if err := w.writeStreamBytes(record); err != nil {
-						return err
-					}
+				if err := w.sendStreamUnits(ctx, step, writer.streamErrorRecords()); err != nil {
+					return err
 				}
 			default:
 				bound := streamPos{stage: stageStreamEnd}
@@ -150,10 +158,8 @@ func (w *responseWriter) runStream(ctx context.Context, prepared *PreparedOutput
 				if err != nil {
 					return err
 				}
-				for _, record := range records {
-					if err := w.writeStreamBytes(record); err != nil {
-						return err
-					}
+				if err := w.sendStreamUnits(ctx, step, records); err != nil {
+					return err
 				}
 			}
 		}
@@ -163,6 +169,51 @@ func (w *responseWriter) runStream(ctx context.Context, prepared *PreparedOutput
 		w.flusher.Flush()
 	}
 	return nil
+}
+
+// sendStreamUnits 把一次 send 的完整字节序列拆成最终发送单元：
+// 未配置 chunks 时单元是单条协议记录；配置后是字节片（sizes 只从序列开头应用一次）。
+// 每个单元前按 send.interval 等待（含第一项），写入后按 config.flush 决定是否立即刷新。
+func (w *responseWriter) sendStreamUnits(ctx context.Context, step *CompiledStep, records [][]byte) error {
+	var units [][]byte
+	if step.Chunks != nil {
+		units = splitChunks(step.Chunks, joinRecords(records))
+	} else {
+		for _, record := range records {
+			if len(record) > 0 {
+				units = append(units, record)
+			}
+		}
+	}
+	for _, unit := range units {
+		if step.Interval > 0 {
+			if err := sleep(ctx, writeOp{kind: opSleep, duration: time.Duration(step.Interval)}); err != nil {
+				return err
+			}
+		}
+		if err := w.writeStreamBytes(unit); err != nil {
+			return err
+		}
+		// design §4.5：chunks 定义的分片逐片 Flush，与 config.flush 无关；
+		// config.flush 只控制未分片时每条记录的刷新行为。
+		if step.Chunks != nil && w.flusher != nil {
+			w.flusher.Flush()
+		}
+	}
+	return nil
+}
+
+// joinRecords 拼接一次 send 的全部记录字节。
+func joinRecords(records [][]byte) []byte {
+	total := 0
+	for _, record := range records {
+		total += len(record)
+	}
+	out := make([]byte, 0, total)
+	for _, record := range records {
+		out = append(out, record...)
+	}
+	return out
 }
 
 // writeStreamBytes 写一条记录并按 config.flush 决定是否立即刷新。
@@ -209,6 +260,10 @@ func planNonStream(prepared *PreparedOutput) ([]writeOp, error) {
 		case OpWait:
 			ops = append(ops, writeOp{kind: opSleep, duration: time.Duration(step.Duration), infinite: step.Infinite})
 		case OpEnd:
+			if step.Mode == EndModeAbort {
+				ops = append(ops, writeOp{kind: opAbort})
+				continue
+			}
 			ops = append(ops, writeOp{kind: opCommit})
 		case OpSend:
 			if step.Target != nil && step.Target.Block == BlockHeaders {
@@ -296,6 +351,26 @@ func (w *responseWriter) commitHeaders() {
 		header.Set("Content-Type", ContentTypeJSON)
 	}
 	w.w.WriteHeader(w.status)
+}
+
+// abortConnection 用 HTTP/1.1 Hijack 接管连接，然后用 SetLinger(0) + Close
+// 让内核发出 TCP RST（而不是优雅 FIN）。响应头未提交时客户端收不到任何字节。
+func (w *responseWriter) abortConnection() error {
+	hijacker, ok := w.w.(http.Hijacker)
+	if !ok {
+		return errors.New("connection does not support hijacking")
+	}
+	conn, _, err := hijacker.Hijack()
+	if err != nil {
+		return err
+	}
+	if tcp, ok := conn.(*net.TCPConn); ok {
+		if err := tcp.SetLinger(0); err != nil {
+			_ = conn.Close()
+			return err
+		}
+	}
+	return conn.Close()
 }
 
 // sleep 执行一次等待；无限等待持续到客户端取消或服务关闭。

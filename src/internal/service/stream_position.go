@@ -186,7 +186,8 @@ func targetPosition(protocol string, geometry streamGeometry, target *Target) (s
 // validateStreamTargets 在 prepare 阶段静态模拟游标，拒绝回退或重复的 target。
 func validateStreamTargets(prepared *PreparedOutput) *model.FrameworkError {
 	geometry := geometryOf(prepared)
-	cursor := streamPos{stage: stageHeaders}
+	// 游标起点在 headers.end 之前，允许第一条 send 就提交响应头。
+	cursor := streamPos{stage: stageHeaders, offset: -1}
 	for i := range prepared.Steps {
 		step := &prepared.Steps[i]
 		if step.Op != OpSend || step.Source != SourceOutput {
