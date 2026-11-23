@@ -61,7 +61,7 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		return constants.ExitConfigError
 	}
 	srv := &http.Server{
-		Handler:           controller.NewRouter(loaded.Registry),
+		Handler:           controller.NewRouter(loaded),
 		ReadHeaderTimeout: loaded.Resolved.ReadHeaderTimeout,
 	}
 	fmt.Fprintf(stdout, "listening on %s with %d scripts\n", listener.Addr().String(), loaded.Registry.Len())

@@ -162,7 +162,8 @@ func TestServeListensAndRegistersRoutes(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		resp, err := http.Post(url, "application/json", strings.NewReader("{}"))
+		resp, err := http.Post(url, "application/json",
+			strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
 		if err != nil {
 			lastErr = err
 			time.Sleep(50 * time.Millisecond)
@@ -170,10 +171,10 @@ func TestServeListensAndRegistersRoutes(t *testing.T) {
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if resp.StatusCode != http.StatusNotImplemented {
-			t.Fatalf("expected 501 placeholder, got %d: %s", resp.StatusCode, body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 decision response, got %d: %s", resp.StatusCode, body)
 		}
-		if !bytes.Contains(body, []byte("mock_not_implemented")) {
+		if !bytes.Contains(body, []byte(`"mock_phase":"B"`)) {
 			t.Fatalf("unexpected body: %s", body)
 		}
 		return

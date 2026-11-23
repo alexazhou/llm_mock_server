@@ -224,7 +224,7 @@ func DuplicateIDError(file string, doc *yaml.Node, id, previousRelPath string) e
 }
 
 // validateOutputAt 校验单个 output 的字段值，错误定位到具体节点。
-func validateOutputAt(file string, outNode *yaml.Node, path string, out *model.Output) error {
+func validateOutputAt(file string, outNode *yaml.Node, path string, out *model.RoundOutput) error {
 	if err := model.ValidateOutputConfig(out.Config); err != nil {
 		return locateFieldError(file, firstNonNil(utils.Lookup(outNode, "config"), outNode), path+".config", err)
 	}
@@ -361,7 +361,7 @@ func addAssertions(r *NullRejecter, list []model.Assertion) {
 	}
 }
 
-func addOutputNulls(r *NullRejecter, out *model.Output) {
+func addOutputNulls(r *NullRejecter, out *model.RoundOutput) {
 	for i := range out.ToolCalls {
 		if out.ToolCalls[i].Arguments.Node != nil {
 			r.allowed[out.ToolCalls[i].Arguments.Node] = true

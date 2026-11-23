@@ -91,12 +91,18 @@ func CompileSystemKey(raw, key, field, mode, path string, allowCount bool) (*Sys
 	return sk, nil
 }
 
-// String 返回用于诊断的 key 描述。
+// String 返回用于诊断的 key 描述：key 名，必要时附带 key 参数。
 func (k *SystemKey) String() string {
 	if k == nil {
 		return ""
 	}
-	return k.Raw
+	if k.Field != "" {
+		return k.Name + "(" + k.Field + ")"
+	}
+	if k.Path != nil && len(k.Path.Raw()) > 0 {
+		return k.Name + "(" + k.Path.Raw() + ")"
+	}
+	return k.Name
 }
 
 // Read 读取 key 的当前值。found=false 表示内部 missing（与 JSON null 严格区分）；

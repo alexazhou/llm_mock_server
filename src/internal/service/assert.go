@@ -39,9 +39,37 @@ var typeNames = map[string]bool{
 	"null": true, "boolean": true, "number": true, "string": true, "array": true, "object": true,
 }
 
+// AssertionCompileError 携带列表下标，便于调用方在原始 YAML 节点上定位行列号。
+type AssertionCompileError struct {
+	Scope   string
+	Index   int
+	Message string
+}
+
+func (e *AssertionCompileError) Error() string {
+	return fmt.Sprintf("%s[%d]: %s", e.Scope, e.Index, e.Message)
+}
+
+func cerr(scope string, index int, format string, args ...any) error {
+	return &AssertionCompileError{Scope: scope, Index: index, Message: stripLocPrefix(scope, index, fmt.Sprintf(format, args...))}
+}
+
+// stripLocPrefix 去掉 CompileSystemKey 已经带上的 "scope[i]: " 前缀，避免重复。
+func stripLocPrefix(scope string, index int, message string) string {
+	prefix := fmt.Sprintf("%s[%d]", scope, index)
+	if strings.HasPrefix(message, prefix+": ") {
+		return strings.TrimPrefix(message, prefix+": ")
+	}
+	if strings.HasPrefix(message, prefix+" (expected): ") {
+		return "expected: " + strings.TrimPrefix(message, prefix+" (expected): ")
+	}
+	return message
+}
+
 // CompiledAssertion 是加载期编译完成的断言或条件。
 type CompiledAssertion struct {
 	Index int
+	Scope string
 	Name  string
 	Key   *SystemKey
 	Op    string
@@ -59,6 +87,7 @@ type CompiledAssertion struct {
 // AssertionResult 是一条断言/条件的求值结果，可直接放进诊断 details。
 type AssertionResult struct {
 	Index   int
+	Scope   string
 	Name    string
 	Key     string
 	Op      string
@@ -83,60 +112,60 @@ func CompileAssertionList(scope string, list []model.Assertion, allowCount bool)
 		loc := fmt.Sprintf("%s[%d]", scope, i)
 		if raw.Name != "" {
 			if prev, ok := names[raw.Name]; ok {
-				return nil, fmt.Errorf("%s: duplicate assertion name %q (already used by %s[%d])", loc, raw.Name, scope, prev)
+				return nil, cerr(scope, i, "duplicate assertion name %q (already used by %s[%d])", raw.Name, scope, prev)
 			}
 			names[raw.Name] = i
 		}
 		key, err := CompileSystemKey(loc, raw.Key, raw.Field, raw.Mode, raw.Path, allowCount)
 		if err != nil {
-			return nil, err
+			return nil, cerr(scope, i, "%v", err)
 		}
 		if raw.Op == "" {
-			return nil, fmt.Errorf("%s: op is required", loc)
+			return nil, cerr(scope, i, "op is required")
 		}
 		if !supportedOps[raw.Op] {
-			return nil, fmt.Errorf("%s: unknown op %q", loc, raw.Op)
+			return nil, cerr(scope, i, "unknown op %q", raw.Op)
 		}
-		assertion := &CompiledAssertion{Index: i, Name: raw.Name, Key: key, Op: raw.Op}
+		assertion := &CompiledAssertion{Index: i, Scope: scope, Name: raw.Name, Key: key, Op: raw.Op}
 
 		switch raw.Op {
 		case OpExists, OpAbsent:
 			if raw.Expected != nil || raw.Default != nil {
-				return nil, fmt.Errorf("%s: %s must not define expected or default", loc, raw.Op)
+				return nil, cerr(scope, i, "%s must not define expected or default", raw.Op)
 			}
 		default:
 			if raw.Expected == nil {
-				return nil, fmt.Errorf("%s: op %q requires expected", loc, raw.Op)
+				return nil, cerr(scope, i, "op %q requires expected", raw.Op)
 			}
 		}
 		if raw.Default != nil {
 			value, err := utils.FromYAMLNode(raw.Default.Node)
 			if err != nil {
-				return nil, fmt.Errorf("%s: default: %v", loc, err)
+				return nil, cerr(scope, i, "default: %v", err)
 			}
 			assertion.Default = value
 			assertion.HasDefault = true
 		}
 		if raw.Expected != nil {
 			if ref, ok, err := asSystemKeyRef(raw.Expected.Node); err != nil {
-				return nil, fmt.Errorf("%s: expected: %v", loc, err)
+				return nil, cerr(scope, i, "expected: %v", err)
 			} else if ok {
 				compiledRef, err := CompileSystemKey(loc+" (expected)", ref.Key, ref.Field, ref.Mode, ref.Path, false)
 				if err != nil {
-					return nil, err
+					return nil, cerr(scope, i, "%v", err)
 				}
 				assertion.ExpectedRef = compiledRef
 			} else {
 				value, err := utils.FromYAMLNode(raw.Expected.Node)
 				if err != nil {
-					return nil, fmt.Errorf("%s: expected: %v", loc, err)
+					return nil, cerr(scope, i, "expected: %v", err)
 				}
 				assertion.ExpectedLiteral = value
 				assertion.HasExpectedLiteral = true
 			}
 		}
-		if err := validateExpectedForOp(loc, assertion); err != nil {
-			return nil, err
+		if err := validateExpectedForOp(assertion); err != nil {
+			return nil, cerr(scope, i, "%v", err)
 		}
 		compiled = append(compiled, assertion)
 	}
@@ -190,7 +219,7 @@ type refKeyRef struct {
 	Path  string
 }
 
-func validateExpectedForOp(loc string, a *CompiledAssertion) error {
+func validateExpectedForOp(a *CompiledAssertion) error {
 	switch a.Op {
 	case OpType:
 		if a.ExpectedRef != nil {
@@ -198,7 +227,7 @@ func validateExpectedForOp(loc string, a *CompiledAssertion) error {
 		}
 		name, ok := a.ExpectedLiteral.(string)
 		if !ok || !typeNames[name] {
-			return fmt.Errorf("%s: type expects null/boolean/number/string/array/object", loc)
+			return fmt.Errorf("type expects null/boolean/number/string/array/object")
 		}
 	case OpRegex:
 		if a.ExpectedRef != nil {
@@ -206,26 +235,26 @@ func validateExpectedForOp(loc string, a *CompiledAssertion) error {
 		}
 		pattern, ok := a.ExpectedLiteral.(string)
 		if !ok {
-			return fmt.Errorf("%s: regex expects a Go RE2 pattern string", loc)
+			return fmt.Errorf("regex expects a Go RE2 pattern string")
 		}
 		re, err := regexp.Compile(pattern)
 		if err != nil {
-			return fmt.Errorf("%s: invalid regex %q: %v", loc, pattern, err)
+			return fmt.Errorf("invalid regex %q: %v", pattern, err)
 		}
 		a.regex = re
 	case OpGt, OpGte, OpLt, OpLte:
 		if a.ExpectedRef == nil && utils.TypeName(a.ExpectedLiteral) != "number" {
-			return fmt.Errorf("%s: %s expects a number", loc, a.Op)
+			return fmt.Errorf("%s expects a number", a.Op)
 		}
 	case OpLengthEq, OpLengthGte, OpLengthLte:
 		if a.ExpectedRef != nil {
 			return nil
 		}
 		if utils.TypeName(a.ExpectedLiteral) != "number" {
-			return fmt.Errorf("%s: %s expects a non-negative integer", loc, a.Op)
+			return fmt.Errorf("%s expects a non-negative integer", a.Op)
 		}
 		if cmp, err := utils.CompareNumbers(a.ExpectedLiteral, utils.Number("0")); err != nil || cmp < 0 {
-			return fmt.Errorf("%s: %s expects a non-negative integer", loc, a.Op)
+			return fmt.Errorf("%s expects a non-negative integer", a.Op)
 		}
 	}
 	return nil
@@ -234,7 +263,7 @@ func validateExpectedForOp(loc string, a *CompiledAssertion) error {
 // Evaluate 求值一条断言/条件。EvaluatorError=true 时调用方应返回 condition error，
 // 而不是「不匹配」。
 func (a *CompiledAssertion) Evaluate(ctx *model.RequestContext) AssertionResult {
-	result := AssertionResult{Index: a.Index, Name: a.Name, Key: a.Key.String(), Op: a.Op}
+	result := AssertionResult{Index: a.Index, Scope: a.Scope, Name: a.Name, Key: a.Key.String(), Op: a.Op}
 	actual, found, err := a.Key.Read(ctx)
 	if err != nil {
 		result.EvaluatorError = true

@@ -20,6 +20,8 @@ type Loaded struct {
 	// ScriptsDir 是解析后的 scripts_dir 绝对路径。
 	ScriptsDir string
 	Registry   *model.Registry
+	// Compiled 是加载期编译完成的剧本（按 id），运行期只读。
+	Compiled map[string]*CompiledScript
 }
 
 // Load 严格加载 server.yaml 与其 scripts_dir 下的全部剧本。
@@ -58,7 +60,7 @@ func Load(configPath string) (*Loaded, error) {
 		scriptsDir = filepath.Join(filepath.Dir(absConfig), scriptsDir)
 	}
 
-	registry, err := loadScripts(scriptsDir)
+	registry, compiled, err := loadScripts(scriptsDir)
 	if err != nil {
 		return nil, err
 	}
@@ -68,6 +70,7 @@ func Load(configPath string) (*Loaded, error) {
 		Resolved:   resolved,
 		ScriptsDir: scriptsDir,
 		Registry:   registry,
+		Compiled:   compiled,
 	}, nil
 }
 
@@ -132,44 +135,53 @@ func ValidateServerNode(file string, doc *yaml.Node) error {
 }
 
 // loadScripts 按字典序加载全部剧本并检查 id 唯一性。
-func loadScripts(scriptsDir string) (*model.Registry, error) {
+func loadScripts(scriptsDir string) (*model.Registry, map[string]*CompiledScript, error) {
 	files, err := ScanScriptFiles(scriptsDir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	entries := make([]*model.Entry, 0, len(files))
 	seen := make(map[string]*model.Entry, len(files))
+	compiled := make(map[string]*CompiledScript, len(files))
 	for _, rel := range files {
 		absPath := filepath.Join(scriptsDir, filepath.FromSlash(rel))
 		data, err := os.ReadFile(absPath)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", absPath, err)
+			return nil, nil, fmt.Errorf("%s: %w", absPath, err)
 		}
 		doc, err := utils.DecodeSingleDocument(data, absPath)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		// 先做结构校验（字段集合、互斥关系），它能给出比通用未知字段更准确的诊断；
 		// 再做严格解码，捕获未知字段与无效类型。
 		if err := ValidateScriptNode(absPath, doc); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		var script model.Script
 		if err := utils.DecodeStrictInto(data, absPath, doc, &script); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if err := NewNullRejecter(&script).Check(absPath, doc, ""); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if err := ValidateScriptSemantics(absPath, doc, &script); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if prev, ok := seen[script.ID]; ok {
-			return nil, DuplicateIDError(absPath, doc, script.ID, prev.RelPath)
+			return nil, nil, DuplicateIDError(absPath, doc, script.ID, prev.RelPath)
 		}
 		entry := &model.Entry{RelPath: rel, AbsPath: absPath, Script: &script}
+		if _, ok := compiled[script.ID]; !ok {
+			// 断言与 when 条件在加载期编译；失败即启动失败。
+			compiledScript, err := CompileScript(entry, doc)
+			if err != nil {
+				return nil, nil, err
+			}
+			compiled[script.ID] = compiledScript
+		}
 		seen[script.ID] = entry
 		entries = append(entries, entry)
 	}
-	return model.NewRegistry(entries), nil
+	return model.NewRegistry(entries), compiled, nil
 }

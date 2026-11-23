@@ -17,9 +17,9 @@ type Script struct {
 
 // Round 是一轮模型输出。output 与 outputs 互斥，input 只做输入校验。
 type Round struct {
-	Input   *RoundInput `yaml:"input"`
-	Output  *Output     `yaml:"output"`
-	Outputs []Output    `yaml:"outputs"`
+	Input   *RoundInput   `yaml:"input"`
+	Output  *RoundOutput  `yaml:"output"`
+	Outputs []RoundOutput `yaml:"outputs"`
 }
 
 // RoundInput 只允许 assert，不参与 round 或 output 选择。
@@ -27,8 +27,8 @@ type RoundInput struct {
 	Assert AssertionList `yaml:"assert"`
 }
 
-// Output 是一个协议无关的输出声明。when 只出现在 outputs 候选项中。
-type Output struct {
+// RoundOutput 是一个协议无关的输出声明。when 只出现在 outputs 候选项中。
+type RoundOutput struct {
 	When      ConditionList  `yaml:"when"`
 	Config    *OutputConfig  `yaml:"config"`
 	Content   *TextValue     `yaml:"content"`
