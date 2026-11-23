@@ -163,6 +163,12 @@ func PrepareOutput(ctx *model.RequestContext, output *CompiledOutput, maxOutputB
 		prepared.Usage = usage
 	}
 
+	// M3 之前的显式边界：流式记录尚未实现时必须在提交响应头之前失败，
+	// 绝不能让客户端拿到「200 + 空 body」这种看起来正常的响应。
+	if prepared.Stream {
+		return nil, prepareFailureOf(prepareError(
+			"streaming output is not implemented yet", ctx), ctx)
+	}
 	if ferr := validateResolvedOutputBytes(prepared, maxOutputBytes); ferr != nil {
 		return nil, prepareFailureOf(ferr, ctx)
 	}

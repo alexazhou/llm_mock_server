@@ -52,7 +52,7 @@ type responseWriter struct {
 // run 规划并执行传输操作。
 func (w *responseWriter) run(ctx context.Context, prepared *PreparedOutput) error {
 	if prepared.Stream {
-		// TODO(M3): 流式协议记录序列与逻辑游标。当前里程碑只交付非流式输出。
+		// prepare 阶段已经拒绝流式；这里是防御性兜底（M3 会实现流式记录）。
 		return errStreamingNotImplemented
 	}
 	ops, err := planNonStream(prepared)
