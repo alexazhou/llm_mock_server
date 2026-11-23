@@ -1,0 +1,18 @@
+version: 1
+id: retry-error
+
+rounds:
+  - outputs:
+      - when:
+          - name: first_request
+            key: request.count
+            op: eq
+            expected: 1
+        config:
+          status: 503
+        error:
+          type: server_error
+          code: upstream_unavailable
+          message: Mock upstream unavailable
+
+      - content: Retry succeeded.

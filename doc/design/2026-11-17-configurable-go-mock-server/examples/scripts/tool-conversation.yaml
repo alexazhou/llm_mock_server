@@ -1,0 +1,65 @@
+version: 1
+id: tool-conversation
+config:
+  max_body_bytes: 8388608
+  read_body_timeout: 15s
+  status: 200
+  flush: true
+  usage:
+    input_tokens: 10
+    output_tokens: 15
+  stream: false
+assert:
+  - name: stream
+    key: request.stream
+    op: eq
+    expected: false
+  - name: message_role
+    key: request.json_body
+    path: $.messages[0].role
+    op: eq
+    expected: user
+  - name: method
+    key: request.method
+    op: eq
+    expected: POST
+rounds:
+  - output:
+      reasoning: 先查询天气。
+      tool_calls:
+        - name: get_weather
+          arguments:
+            city: Beijing
+
+  - input:
+      assert:
+        - name: assistant_role
+          key: request.json_body
+          path: $.messages[1].role
+          op: eq
+          expected: assistant
+        - name: assistant_tool_id
+          key: request.json_body
+          path: $.messages[1].tool_calls[0].id
+          op: exists
+        - name: message_role
+          key: request.round_input
+          path: $[0].role
+          op: eq
+          expected: tool
+        - name: tool_result_id
+          key: request.round_input
+          path: $[0].tool_call_id
+          op: eq
+          expected:
+            key: request.json_body
+            path: $.messages[1].tool_calls[0].id
+        - name: tool_result_text
+          key: request.round_input
+          path: $[0].content
+          op: contains
+          expected: 晴
+    output:
+      config:
+        flush: false
+      content: 北京今天晴。

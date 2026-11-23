@@ -1,0 +1,33 @@
+version: 1
+id: chat-non-stream
+config:
+  max_body_bytes: 8388608
+  read_body_timeout: 15s
+  status: 200
+  usage:
+    input_tokens: 10
+    output_tokens: 15
+  stream: false
+assert:
+  - name: messages_type
+    key: request.json_body
+    path: $.messages
+    op: type
+    expected: array
+  - name: messages_not_empty
+    key: request.json_body
+    path: $.messages
+    op: length_gte
+    expected: 1
+  - name: stream
+    key: request.stream
+    op: eq
+    expected: false
+  - name: method
+    key: request.method
+    op: eq
+    expected: POST
+rounds:
+  - output:
+      content: Hello!
+      reasoning: 先分析用户的问题。

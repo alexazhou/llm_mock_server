@@ -1,0 +1,19 @@
+version: 1
+listen: 127.0.0.1:9999
+scripts_dir: scripts
+config:
+  max_body_bytes: 8388608
+  read_body_timeout: 15s
+transport:
+  read_header_timeout: 5s
+runtime:
+  max_active_requests: 256
+  max_output_bytes: 67108864
+  max_fixture_bytes: 8388608
+  max_generated_events: 10000
+  max_write_units: 100000
+  shutdown_timeout: 3s
+capture:
+  capacity: 500
+  max_body_bytes: 8388608
+  max_total_bytes: 67108864
