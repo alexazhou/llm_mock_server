@@ -98,6 +98,113 @@ rounds:
 	}
 }
 
+// TestAssertionDetailsSplitsKeyArguments 锁定 envelope 口径：key 只放系统 key 名，
+// field / path 各自独立成字段，default_applied 恒出现（false 也给 false）。
+func TestAssertionDetailsSplitsKeyArguments(t *testing.T) {
+	headerScript := `version: 1
+id: header-shape
+assert:
+  - name: tenant
+    key: request.header
+    field: X-Absent
+    op: exists
+rounds:
+  - output:
+      content: hi
+`
+	pathScript := `version: 1
+id: path-shape
+assert:
+  - name: role_is_assistant
+    key: request.round_input
+    path: $[0].role
+    op: eq
+    expected: assistant
+rounds:
+  - output:
+      content: hi
+`
+	defaultScript := `version: 1
+id: default-shape
+assert:
+  - name: flag_defaulted
+    key: request.header
+    field: X-Flag
+    op: eq
+    expected: d
+    default: d
+  - name: always_fails
+    key: request.model
+    op: eq
+    expected: other
+rounds:
+  - output:
+      content: hi
+`
+	executor := newExecutor(t, "", map[string]string{
+		"header.yaml": headerScript, "path.yaml": pathScript, "default.yaml": defaultScript,
+	})
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
+
+	// header：key 不带 (field)，field 独立，无 path 字段。
+	status, ferr := execute(executor, "header-shape", "openai", body)
+	if status != 422 || ferr.Code != model.CodeAssertionFailed {
+		t.Fatalf("expected 422 assertion failed, got %d %v", status, ferr)
+	}
+	assertion, ok := ferr.Details["assertion"].(map[string]any)
+	if !ok {
+		t.Fatalf("details.assertion missing: %#v", ferr.Details)
+	}
+	if assertion["key"] != "request.header" {
+		t.Fatalf("key must be the bare system key name, got %#v", assertion["key"])
+	}
+	if assertion["field"] != "X-Absent" {
+		t.Fatalf("field must be an independent field, got %#v", assertion["field"])
+	}
+	if _, has := assertion["path"]; has {
+		t.Fatalf("path must be absent when the key has no path argument: %#v", assertion)
+	}
+	if applied, has := assertion["default_applied"]; !has || applied != false {
+		t.Fatalf("default_applied must always be present (false here): %#v", assertion)
+	}
+
+	// path：key 不带 ($[0].role)，path 独立，无 field 字段。
+	status, ferr = execute(executor, "path-shape", "openai", body)
+	if status != 422 || ferr.Code != model.CodeAssertionFailed {
+		t.Fatalf("expected 422 assertion failed, got %d %v", status, ferr)
+	}
+	assertion, ok = ferr.Details["assertion"].(map[string]any)
+	if !ok {
+		t.Fatalf("details.assertion missing: %#v", ferr.Details)
+	}
+	if assertion["key"] != "request.round_input" {
+		t.Fatalf("key must be the bare system key name, got %#v", assertion["key"])
+	}
+	if assertion["path"] != "$[0].role" {
+		t.Fatalf("path must be an independent field, got %#v", assertion["path"])
+	}
+	if _, has := assertion["field"]; has {
+		t.Fatalf("field must be absent when the key has no field argument: %#v", assertion)
+	}
+
+	// default：命中 default 的那条在 details.assertions 里带 default_applied=true。
+	status, ferr = execute(executor, "default-shape", "openai", body)
+	if status != 422 || ferr.Code != model.CodeAssertionFailed {
+		t.Fatalf("expected 422 assertion failed, got %d %v", status, ferr)
+	}
+	all, ok := ferr.Details["assertions"].([]any)
+	if !ok || len(all) != 2 {
+		t.Fatalf("details.assertions missing: %#v", ferr.Details)
+	}
+	first, ok := all[0].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected assertions[0]: %#v", all[0])
+	}
+	if first["default_applied"] != true || first["actual"] != "d" {
+		t.Fatalf("default applied must be observable: %#v", first)
+	}
+}
+
 func TestCountConsumptionRules(t *testing.T) {
 	script := `version: 1
 id: counted

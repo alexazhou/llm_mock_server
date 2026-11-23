@@ -86,10 +86,14 @@ type CompiledAssertion struct {
 
 // AssertionResult 是一条断言/条件的求值结果，可直接放进诊断 details。
 type AssertionResult struct {
-	Index   int
-	Scope   string
-	Name    string
+	Index int
+	Scope string
+	Name  string
+	// Key 只放系统 key 名（如 request.header）；key 参数各自独立成字段：
+	// Field 是 header/query 名，Path 是 JSONPath 子集原文。都不含参数字符串拼接。
 	Key     string
+	Field   string
+	Path    string
 	Op      string
 	Matched bool
 	Reason  string
@@ -263,7 +267,8 @@ func validateExpectedForOp(a *CompiledAssertion) error {
 // Evaluate 求值一条断言/条件。EvaluatorError=true 时调用方应返回 condition error，
 // 而不是「不匹配」。
 func (a *CompiledAssertion) Evaluate(ctx *model.RequestContext) AssertionResult {
-	result := AssertionResult{Index: a.Index, Scope: a.Scope, Name: a.Name, Key: a.Key.String(), Op: a.Op}
+	result := AssertionResult{Index: a.Index, Scope: a.Scope, Name: a.Name,
+		Key: a.Key.Name, Field: a.Key.Field, Path: a.Key.PathRaw(), Op: a.Op}
 	actual, found, err := a.Key.Read(ctx)
 	if err != nil {
 		result.EvaluatorError = true

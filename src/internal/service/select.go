@@ -84,13 +84,22 @@ func BaseDetails(ctx *model.RequestContext) map[string]any {
 }
 
 // AssertionDetails 把一条断言/条件结果转成稳定的 JSON 结构（任意值走 4096 字节预览）。
+// key 只放系统 key 名；key 参数（field / path）各自独立成字段，无该参数时不出现。
+// default_applied 恒出现：false 也输出 false，避免「没触发」与「没实现」不可区分。
 func AssertionDetails(result AssertionResult) map[string]any {
 	out := map[string]any{
-		"index":   result.Index,
-		"scope":   result.Scope,
-		"key":     result.Key,
-		"op":      result.Op,
-		"matched": result.Matched,
+		"index":           result.Index,
+		"scope":           result.Scope,
+		"key":             result.Key,
+		"op":              result.Op,
+		"matched":         result.Matched,
+		"default_applied": result.DefaultApplied,
+	}
+	if result.Field != "" {
+		out["field"] = result.Field
+	}
+	if result.Path != "" {
+		out["path"] = result.Path
 	}
 	if result.Name != "" {
 		out["name"] = result.Name
@@ -102,9 +111,6 @@ func AssertionDetails(result AssertionResult) map[string]any {
 	out["actual"] = utils.Preview(result.Actual)
 	if result.HasExpected {
 		out["expected"] = utils.Preview(result.Expected)
-	}
-	if result.DefaultApplied {
-		out["default_applied"] = true
 	}
 	return out
 }

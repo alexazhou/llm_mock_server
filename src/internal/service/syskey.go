@@ -91,7 +91,16 @@ func CompileSystemKey(raw, key, field, mode, path string, allowCount bool) (*Sys
 	return sk, nil
 }
 
+// PathRaw 返回 path 参数原文；没有 path 时返回空串（诊断里据此决定是否输出该字段）。
+func (k *SystemKey) PathRaw() string {
+	if k == nil || k.Path == nil {
+		return ""
+	}
+	return k.Path.Raw()
+}
+
 // String 返回用于诊断的 key 描述：key 名，必要时附带 key 参数。
+// 只用于人类可读的错误/原因文本；结构化诊断请用 Name/Field/PathRaw 三个独立字段。
 func (k *SystemKey) String() string {
 	if k == nil {
 		return ""
