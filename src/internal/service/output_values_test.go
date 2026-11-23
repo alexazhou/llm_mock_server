@@ -394,3 +394,38 @@ rounds:
 		t.Fatal("non-string key field must not be treated as a reference")
 	}
 }
+
+// TestResolveUsageNumberNullIsNotMissing 验证只有内部 missing 才触发 default：
+// 请求里显式为 null / 0 / false / "" 的值都不是 missing。
+func TestResolveUsageNumberNullIsNotMissing(t *testing.T) {
+	key, err := CompileSystemKey("usage.input_tokens", KeyRequestJSONBody, "", "", "$.n", true)
+	if err != nil {
+		t.Fatalf("compile key: %v", err)
+	}
+	fallback := int64(5)
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"null", `{"n": null}`},
+		{"string", `{"n": "7"}`},
+		{"bool", `{"n": false}`},
+	} {
+		ctx := newValueContext(t, tc.body)
+		if _, err := ResolveUsageNumber(ctx, "usage.input_tokens", UsageNumber{Ref: key, Default: &fallback}); err == nil {
+			t.Fatalf("%s: explicit non-integer value must not fall back to default", tc.name)
+		}
+	}
+	// 显式 0 是合法整数，也不触发 default。
+	ctx := newValueContext(t, `{"n": 0}`)
+	value, err := ResolveUsageNumber(ctx, "usage.input_tokens", UsageNumber{Ref: key, Default: &fallback})
+	if err != nil || value != 0 {
+		t.Fatalf("explicit zero must be used as-is: %d %v", value, err)
+	}
+	// 路径缺失才是 missing。
+	ctx = newValueContext(t, `{}`)
+	value, err = ResolveUsageNumber(ctx, "usage.input_tokens", UsageNumber{Ref: key, Default: &fallback})
+	if err != nil || value != fallback {
+		t.Fatalf("missing key must use default: %d %v", value, err)
+	}
+}
