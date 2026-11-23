@@ -1,0 +1,114 @@
+name: Go CI
+
+# 触发口径对齐 togo 项目（TeamAgent/.github/workflows/test.yml）：所有分支的 push（不含 tag）、
+# 所有 PR、以及手动 workflow_dispatch。tag 触发留给将来的 release 流水线。
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+  workflow_dispatch:
+
+# 最小权限：只读仓库内容，不写 commit/PR/artifact 之外的任何东西。
+permissions:
+  contents: read
+
+# 同一分支/PR 有新 push 时取消旧 run，避免排队堆积（对 main 之外的开发分支尤其有用）。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# 所有 run 步骤默认在 Go 模块根（src/）执行；`with:` 输入不受此影响（相对仓库根）。
+defaults:
+  run:
+    working-directory: src
+
+jobs:
+  check:
+    name: Check (gofmt, vet, race tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: src/go.mod
+          cache: true
+          cache-dependency-path: src/go.sum
+
+      - name: Show toolchain versions
+        run: |
+          go version
+          go env GOOS GOARCH CGO_ENABLED
+
+      - name: Verify gofmt reports no diff
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt must be applied to these files:"
+            echo "$unformatted"
+            exit 1
+          fi
+          echo "gofmt clean"
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run tests with the race detector
+        run: go test -race ./...
+
+      - name: Build the server for the host platform
+        run: go build ./...
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ''
+          - goos: darwin
+            goarch: arm64
+            ext: ''
+          - goos: windows
+            goarch: amd64
+            ext: '.exe'
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: src/go.mod
+          cache: true
+          cache-dependency-path: src/go.sum
+
+      - name: Build the ${{ matrix.goos }}/${{ matrix.goarch }} binary
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          artifact="mock-server-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+          go build -trimpath -o "dist/${artifact}" .
+          echo "built ${artifact}"
+          ls -l dist
+
+      - name: Upload the ${{ matrix.goos }}/${{ matrix.goarch }} artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: mock-server-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: src/dist/*
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
