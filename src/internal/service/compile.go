@@ -13,7 +13,9 @@ import (
 // CompiledScript 是加载期编译完成的剧本：断言与 when 条件已编译、
 // 结构已校验，运行期只读。
 type CompiledScript struct {
-	Entry  *model.Entry
+	Entry *model.Entry
+	// Doc 是该剧本的原始 YAML 文档，加载期用于把编译错误定位到行列号。
+	Doc    *yaml.Node
 	Script *model.Script
 	Assert []*CompiledAssertion
 	Rounds []CompiledRound
@@ -32,6 +34,10 @@ type CompiledOutput struct {
 	Fallback bool
 	When     []*CompiledAssertion
 	Output   *model.RoundOutput
+	// Effective 是该 output 的有效输出配置（回退链已解析）。
+	Effective *EffectiveConfig
+	// Steps 是编译后的默认过程或显式 steps。
+	Steps []CompiledStep
 }
 
 // CompileScript 编译一个剧本的全部断言与条件；失败时返回带文件与节点的错误，
@@ -39,7 +45,7 @@ type CompiledOutput struct {
 func CompileScript(entry *model.Entry, doc *yaml.Node) (*CompiledScript, error) {
 	script := entry.Script
 	root := utils.Root(doc)
-	compiled := &CompiledScript{Entry: entry, Script: script}
+	compiled := &CompiledScript{Entry: entry, Doc: doc, Script: script}
 
 	var err error
 	compiled.Assert, err = compileAt(entry.AbsPath, utils.Lookup(root, "assert"), "assert", "assert", script.Assert, false)

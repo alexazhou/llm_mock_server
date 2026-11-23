@@ -64,14 +64,19 @@ func Load(configPath string) (*Loaded, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Loaded{
+	loaded := &Loaded{
 		ConfigPath: absConfig,
 		Server:     &server,
 		Resolved:   resolved,
 		ScriptsDir: scriptsDir,
 		Registry:   registry,
 		Compiled:   compiled,
-	}, nil
+	}
+	// 输出配置、steps 与 fixture 在加载期一次性编译与校验；失败即启动失败。
+	if err := compileOutputTransport(loaded); err != nil {
+		return nil, err
+	}
+	return loaded, nil
 }
 
 // ValidateServerNode 在原始节点上校验 server.yaml 的必填项与标量类型，

@@ -52,6 +52,8 @@ type CompiledStep struct {
 	Raw []byte
 	// RawSource 记录 raw 的来源（text/base64/fixture），仅用于诊断。
 	RawSource string
+	// Fixture 是 source=raw 且 RawSource=fixture 时的相对路径；加载器据此读取字节回填 Raw。
+	Fixture string
 }
 
 // CompileSteps 编译并静态校验 output.steps。
@@ -227,9 +229,9 @@ func compileSendStep(path, stepPath string, raw *model.Step, out *model.RoundOut
 		}
 		if raw.Fixture != nil {
 			sources++
-			// fixture 的字节由加载器在 CompileOutputTransport 中读取并回填。
+			// fixture 的字节由加载器在编译传输层时读取并回填。
 			step.RawSource = "fixture"
-			step.Text = *raw.Fixture
+			step.Fixture = *raw.Fixture
 		}
 		if sources != 1 {
 			return step, fieldErrAt(path, stepPath, "source: raw requires exactly one of text, base64 or fixture")
