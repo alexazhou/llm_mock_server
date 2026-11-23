@@ -140,7 +140,8 @@ func TestResolveOutputConfigRejectsBadUsage(t *testing.T) {
 		{"negative", "usage:\n  output_tokens: -1\n"},
 		{"string", "usage:\n  output_tokens: \"12\"\n"},
 		{"float", "usage:\n  output_tokens: 1.5\n"},
-		{"default", "usage:\n  output_tokens:\n    key: request.json_body\n    path: $.n\n    default: 0\n"},
+		{"negative default", "usage:\n  output_tokens:\n    key: request.json_body\n    path: $.n\n    default: -1\n"},
+		{"non-integer default", "usage:\n  output_tokens:\n    key: request.json_body\n    path: $.n\n    default: \"7\"\n"},
 		{"unknown key", "usage:\n  output_tokens:\n    key: request.nope\n"},
 	}
 	for _, tc := range cases {

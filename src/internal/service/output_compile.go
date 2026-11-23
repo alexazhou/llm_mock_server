@@ -67,6 +67,9 @@ func compileOneOutput(candidate *CompiledOutput, compiled *CompiledScript, base 
 	if err := compileOutputValues(candidate, base, path, file); err != nil {
 		return err
 	}
+	if err := validateStaticOutputBytes(candidate, limits.MaxOutputBytes); err != nil {
+		return utils.NewPositionError(file, base, path, err.Error())
+	}
 	return nil
 }
 

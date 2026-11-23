@@ -172,9 +172,11 @@ func TestServeListensAndRegistersRoutes(t *testing.T) {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("expected 200 decision response, got %d: %s", resp.StatusCode, body)
+			t.Fatalf("expected 200 chat completion, got %d: %s", resp.StatusCode, body)
 		}
-		if !bytes.Contains(body, []byte(`"mock_phase":"B"`)) {
+		// C 阶段起返回真实协议响应，不再有 B 阶段的决策回显。
+		if !bytes.Contains(body, []byte(`"object":"chat.completion"`)) ||
+			!bytes.Contains(body, []byte(`"content":"hi"`)) {
 			t.Fatalf("unexpected body: %s", body)
 		}
 		return

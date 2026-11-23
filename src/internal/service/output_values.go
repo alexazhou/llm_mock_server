@@ -402,8 +402,8 @@ func GenerateToolCallID(protocol string) string {
 	return prefix + hex.EncodeToString(buf)
 }
 
-// ResolveUsageNumber 在 prepare 阶段解析 usage 数字字段。引用键缺失时回退到
-// 外层（剧本/服务默认）已解析出的字面值；解析结果必须是 0 或正整数。
+// ResolveUsageNumber 在 prepare 阶段解析 usage 数字字段。引用键缺失时使用
+// default（未声明 default 则报错，由 prepare 转成 500）；结果必须是 0 或正整数。
 func ResolveUsageNumber(ctx *model.RequestContext, field string, n UsageNumber) (int64, error) {
 	if n.Ref == nil {
 		return n.Literal, nil
@@ -413,10 +413,10 @@ func ResolveUsageNumber(ctx *model.RequestContext, field string, n UsageNumber) 
 		return 0, fmt.Errorf("%s: %v", field, err)
 	}
 	if !found {
-		if n.Fallback != nil {
-			return *n.Fallback, nil
+		if n.Default != nil {
+			return *n.Default, nil
 		}
-		return 0, fmt.Errorf("%s: %s is not present in the request", field, n.Ref.String())
+		return 0, fmt.Errorf("%s: %s is not present in the request and has no default", field, n.Ref.String())
 	}
 	number, err := jsonInteger(value)
 	if err != nil {

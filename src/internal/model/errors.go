@@ -16,6 +16,7 @@ const (
 	CodeOutputNotFound         = "mock_output_not_found"
 	CodeOutputConditionError   = "mock_output_condition_error"
 	CodeCapacityExceeded       = "mock_capacity_exceeded"
+	CodeOutputPrepareError     = "mock_output_prepare_error"
 	CodeInternalError          = "mock_internal_error"
 )
 
@@ -66,7 +67,7 @@ func StatusForCode(code string) int {
 		return http.StatusUnprocessableEntity
 	case CodeCapacityExceeded:
 		return http.StatusServiceUnavailable
-	case CodeOutputNotFound, CodeOutputConditionError, CodeInternalError:
+	case CodeOutputNotFound, CodeOutputConditionError, CodeOutputPrepareError, CodeInternalError:
 		return http.StatusInternalServerError
 	}
 	return http.StatusInternalServerError

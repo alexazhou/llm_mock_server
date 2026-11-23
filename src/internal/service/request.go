@@ -10,7 +10,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/alexazhou/llm_mock_server/internal/constants"
 	"github.com/alexazhou/llm_mock_server/internal/model"
 )
 
@@ -43,6 +42,8 @@ type ExecutionResult struct {
 	OutputIndex  int
 	Status       int
 	Stream       bool
+	// Prepared 是 prepare 阶段解析出的输出快照，交给 WriteOutput 编码。
+	Prepared *PreparedOutput
 }
 
 // Execute 处理一次剧本请求。返回的 FrameworkError 由调用方按统一 envelope 输出。
@@ -125,7 +126,10 @@ func (e *Executor) Execute(w http.ResponseWriter, r *http.Request, scriptID, pro
 		return nil, withBase(ferr, ctx)
 	}
 
-	status, stream := resolveOutputSettings(script.Script, output.Output, e.Loaded.Resolved.ScriptConfig, ctx.Stream)
+	prepared, ferr := PrepareOutput(ctx, output, e.Loaded.Resolved.MaxOutputBytes)
+	if ferr != nil {
+		return nil, ferr
+	}
 	return &ExecutionResult{
 		ScriptID:     scriptID,
 		Protocol:     protocol,
@@ -134,8 +138,9 @@ func (e *Executor) Execute(w http.ResponseWriter, r *http.Request, scriptID, pro
 		OutputCount:  ctx.OutputCount,
 		RoundIndex:   round.Index,
 		OutputIndex:  output.Index,
-		Status:       status,
-		Stream:       stream,
+		Status:       prepared.Status,
+		Stream:       prepared.Stream,
+		Prepared:     prepared,
 	}, nil
 }
 
@@ -240,38 +245,6 @@ func withBase(ferr *model.FrameworkError, ctx *model.RequestContext) *model.Fram
 		ferr.Details["request_id"] = ctx.RequestID
 	}
 	return ferr
-}
-
-// resolveOutputSettings 按 output.config → 剧本 config → server.config → 内置默认值解析
-// 期望的状态码与流式模式；B 只回显，不据此改变传输行为。
-func resolveOutputSettings(script *model.Script, output *model.RoundOutput, defaults model.ScriptDefaults, requestStream bool) (int, bool) {
-	status := defaults.Status
-	streamMode := defaults.Stream
-	if script != nil && script.Config != nil {
-		if script.Config.Status != nil {
-			status = *script.Config.Status
-		}
-		if script.Config.Stream != nil {
-			streamMode = script.Config.Stream.Value
-		}
-	}
-	if output != nil && output.Config != nil {
-		if output.Config.Status != nil {
-			status = *output.Config.Status
-		}
-		if output.Config.Stream != nil {
-			streamMode = output.Config.Stream.Value
-		}
-	}
-	switch streamMode {
-	case constants.StreamTrue:
-		return status, true
-	case constants.StreamFalse:
-		return status, false
-	default:
-		// auto：跟随请求的 stream 值。
-		return status, requestStream
-	}
 }
 
 func newRequestID() string {

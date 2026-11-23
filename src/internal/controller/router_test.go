@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/alexazhou/llm_mock_server/internal/service"
@@ -23,17 +24,41 @@ type envelope struct {
 	} `json:"error"`
 }
 
-type decision struct {
-	MockPhase    string `json:"mock_phase"`
-	Placeholder  bool   `json:"placeholder"`
-	ScriptID     string `json:"script_id"`
-	Protocol     string `json:"protocol"`
-	RequestCount uint64 `json:"request_count"`
-	OutputCount  int    `json:"output_count"`
-	RoundIndex   int    `json:"round_index"`
-	OutputIndex  int    `json:"output_index"`
-	Status       int    `json:"status"`
-	Stream       bool   `json:"stream"`
+// chatCompletion 只解析探针需要的字段；响应容器本身由 adapter 单测覆盖。
+type chatCompletion struct {
+	Object string `json:"object"`
+	Model  string `json:"model"`
+	Choice []struct {
+		FinishReason string `json:"finish_reason"`
+		Message      struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
+}
+
+// anthropicMessage 解析 Anthropic 非流式容器的探针字段。
+type anthropicMessage struct {
+	Type    string `json:"type"`
+	Role    string `json:"role"`
+	Content []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+	StopReason string `json:"stop_reason"`
+}
+
+// responsesObject 解析 Responses 非流式容器的探针字段。
+type responsesObject struct {
+	Object string `json:"object"`
+	Status string `json:"status"`
+	Output []struct {
+		Type    string `json:"type"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	} `json:"output"`
 }
 
 func newTestRouter(t *testing.T, serverYAML string, scripts map[string]string) *http.ServeMux {
@@ -75,51 +100,109 @@ rounds:
       content: Hi
 `
 
-func TestDecisionResponseForSingleOutput(t *testing.T) {
+func TestChatCompletionResponseForSingleOutput(t *testing.T) {
 	router := newTestRouter(t, "", map[string]string{"hello.yaml": helloScript})
 	body := `{"model":"gpt-4o","messages":[{"role":"system","content":"x"},{"role":"user","content":"hi"}]}`
 	rec := doPost(router, "/mock/hello/v1/chat/completions", body)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var got decision
+	var got chatCompletion
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	want := decision{MockPhase: "B", Placeholder: true, ScriptID: "hello", Protocol: "openai",
-		RequestCount: 1, OutputCount: 0, RoundIndex: 1, OutputIndex: 0, Status: 200, Stream: false}
-	if got != want {
-		t.Fatalf("unexpected decision: %+v want %+v", got, want)
+	if got.Object != "chat.completion" || got.Model != "gpt-4o" {
+		t.Fatalf("unexpected container: %+v", got)
+	}
+	if len(got.Choice) != 1 {
+		t.Fatalf("expected exactly one choice, got %+v", got.Choice)
+	}
+	choice := got.Choice[0]
+	if choice.Message.Role != "assistant" || choice.Message.Content != "Hi" || choice.FinishReason != "stop" {
+		t.Fatalf("unexpected choice: %+v", choice)
 	}
 }
 
-func TestCountIsIsolatedPerProtocolAndIncrementsPerAcceptedRequest(t *testing.T) {
-	router := newTestRouter(t, "", map[string]string{"hello.yaml": helloScript})
-	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
+// countedScript 用 when: request.count 把计数暴露成可观测的正文，
+// 因为 C 阶段不再有决策回显。
+const countedScript = `version: 1
+id: counted
+rounds:
+  - outputs:
+      - when:
+          - key: request.count
+            op: eq
+            expected: 1
+        content: first
+      - when:
+          - key: request.count
+            op: eq
+            expected: 2
+        content: second
+      - content: later
+`
 
-	first := doPost(router, "/mock/hello/v1/chat/completions", body)
-	second := doPost(router, "/mock/hello/v1/chat/completions", body)
-	anthropic := doPost(router, "/mock/hello/v1/messages", body)
+func TestCountIsIsolatedPerProtocolAndIncrementsPerAcceptedRequest(t *testing.T) {
+	router := newTestRouter(t, "", map[string]string{"counted.yaml": countedScript})
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
 
 	for _, tc := range []struct {
 		name string
-		rec  *httptest.ResponseRecorder
-		want uint64
+		path string
+		want string
 	}{
-		{"openai first", first, 1},
-		{"openai second", second, 2},
-		{"anthropic first", anthropic, 1},
+		{"openai first", "/mock/counted/v1/chat/completions", "first"},
+		{"openai second", "/mock/counted/v1/chat/completions", "second"},
+		{"openai third", "/mock/counted/v1/chat/completions", "later"},
+		{"anthropic first", "/mock/counted/v1/messages", "first"},
 	} {
-		var got decision
-		if err := json.Unmarshal(tc.rec.Body.Bytes(), &got); err != nil {
-			t.Fatalf("%s: %v", tc.name, err)
+		rec := doPost(router, tc.path, body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d: %s", tc.name, rec.Code, rec.Body.String())
 		}
-		if got.RequestCount != tc.want {
-			t.Fatalf("%s: request_count=%d want %d", tc.name, got.RequestCount, tc.want)
+		if got := contentOf(t, tc.path, rec.Body.Bytes()); got != tc.want {
+			t.Fatalf("%s: content=%q want %q", tc.name, got, tc.want)
 		}
-		if got.RoundIndex != 1 {
-			t.Fatalf("%s: round_index must stay 1 regardless of count, got %d", tc.name, got.RoundIndex)
+	}
+}
+
+// contentOf 按 URL 协议取出正文，供计数类用例断言。
+func contentOf(t *testing.T, path string, body []byte) string {
+	t.Helper()
+	switch {
+	case strings.HasSuffix(path, "/v1/messages"):
+		var got anthropicMessage
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatalf("decode anthropic body: %v", err)
 		}
+		for _, block := range got.Content {
+			if block.Type == "text" {
+				return block.Text
+			}
+		}
+		return ""
+	case strings.HasSuffix(path, "/v1/responses"):
+		var got responsesObject
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatalf("decode responses body: %v", err)
+		}
+		for _, item := range got.Output {
+			for _, part := range item.Content {
+				if part.Type == "output_text" {
+					return part.Text
+				}
+			}
+		}
+		return ""
+	default:
+		var got chatCompletion
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatalf("decode chat body: %v", err)
+		}
+		if len(got.Choice) == 0 {
+			return ""
+		}
+		return got.Choice[0].Message.Content
 	}
 }
 
@@ -144,14 +227,17 @@ func TestWhenSelectsByRequestCount(t *testing.T) {
 	first := doPost(router, "/mock/retry/v1/chat/completions", body)
 	second := doPost(router, "/mock/retry/v1/chat/completions", body)
 
-	var firstBody, secondBody decision
-	_ = json.Unmarshal(first.Body.Bytes(), &firstBody)
-	_ = json.Unmarshal(second.Body.Bytes(), &secondBody)
-	if firstBody.OutputIndex != 1 || firstBody.Status != 200 {
-		t.Fatalf("first request must hit fallback: %+v", firstBody)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first request must hit the fallback with 200, got %d: %s", first.Code, first.Body.String())
 	}
-	if secondBody.OutputIndex != 0 || secondBody.Status != 503 {
-		t.Fatalf("second request must hit the count==2 candidate: %+v", secondBody)
+	if got := contentOf(t, "/mock/retry/v1/chat/completions", first.Body.Bytes()); got != "ok" {
+		t.Fatalf("first request must hit the fallback output, got %q", got)
+	}
+	if second.Code != http.StatusServiceUnavailable {
+		t.Fatalf("second request must hit the count==2 candidate with 503, got %d", second.Code)
+	}
+	if got := contentOf(t, "/mock/retry/v1/chat/completions", second.Body.Bytes()); got != "second request fails" {
+		t.Fatalf("second request content = %q", got)
 	}
 }
 
@@ -282,10 +368,18 @@ func TestProtocolSelectedByURLOnly(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var got decision
-	_ = json.Unmarshal(rec.Body.Bytes(), &got)
-	if got.Protocol != "anthropic" {
-		t.Fatalf("URL must select anthropic, got %q", got.Protocol)
+	var got anthropicMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Type != "message" || got.Role != "assistant" {
+		t.Fatalf("URL must select the anthropic container, got %+v", got)
+	}
+	if len(got.Content) != 1 || got.Content[0].Type != "text" || got.Content[0].Text != "Hi" {
+		t.Fatalf("unexpected anthropic content: %+v", got.Content)
+	}
+	if got.StopReason != "end_turn" {
+		t.Fatalf("unexpected stop_reason: %q", got.StopReason)
 	}
 
 	// openai URL 却缺 messages ⇒ 422，不回落到其它协议。

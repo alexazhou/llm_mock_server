@@ -210,19 +210,22 @@ func TestResolveUsageNumber(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile key: %v", err)
 	}
-	fallback := int64(11)
-	value, err := ResolveUsageNumber(ctx, "usage.cached_input_tokens", UsageNumber{Ref: key, Fallback: &fallback})
+	value, err := ResolveUsageNumber(ctx, "usage.cached_input_tokens", UsageNumber{Ref: key})
 	if err != nil || value != 7 {
 		t.Fatalf("dynamic usage: %d %v", value, err)
 	}
-	// 键缺失时回退到外层值。
+	// 键缺失：带 default 用 default，没有 default 报错。
 	missing, err := CompileSystemKey("usage.cached_input_tokens", KeyRequestJSONBody, "", "", "$.nope", true)
 	if err != nil {
 		t.Fatalf("compile key: %v", err)
 	}
-	value, err = ResolveUsageNumber(ctx, "usage.cached_input_tokens", UsageNumber{Ref: missing, Fallback: &fallback})
+	fallback := int64(11)
+	value, err = ResolveUsageNumber(ctx, "usage.cached_input_tokens", UsageNumber{Ref: missing, Default: &fallback})
 	if err != nil || value != 11 {
-		t.Fatalf("missing usage must fall back: %d %v", value, err)
+		t.Fatalf("missing usage must use the default: %d %v", value, err)
+	}
+	if _, err := ResolveUsageNumber(ctx, "usage.cached_input_tokens", UsageNumber{Ref: missing}); err == nil {
+		t.Fatal("missing usage without default must fail")
 	}
 	// 非整数/负数一律拒绝。
 	negative, err := CompileSystemKey("usage.input_tokens", KeyRequestJSONBody, "", "", "$.neg", true)

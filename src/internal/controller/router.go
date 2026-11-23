@@ -1,5 +1,5 @@
-// Package controller 负责路由注册与 HTTP 响应编码。B 阶段的请求流水线在
-// service 中实现，这里只做路径分发、统一 JSON envelope 与占位决策回显。
+// Package controller 负责路由注册与 HTTP 响应编码。请求流水线、输出准备与
+// 传输都在 service 中实现，这里只做路径分发与框架错误 envelope。
 package controller
 
 import (
@@ -52,7 +52,8 @@ func NewRouter(loaded *service.Loaded) *http.ServeMux {
 				writeError(w, ferr)
 				return
 			}
-			writeDecision(w, result)
+			// 响应头可能已提交，写失败只可能是客户端断开，不再写错误 envelope。
+			_ = service.WriteOutput(w, r, result.Prepared)
 		})
 	}
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -75,19 +76,6 @@ type errorBody struct {
 	Details   map[string]any `json:"details,omitempty"`
 }
 
-type decisionBody struct {
-	MockPhase    string `json:"mock_phase"`
-	Placeholder  bool   `json:"placeholder"`
-	ScriptID     string `json:"script_id"`
-	Protocol     string `json:"protocol"`
-	RequestCount uint64 `json:"request_count"`
-	OutputCount  int    `json:"output_count"`
-	RoundIndex   int    `json:"round_index"`
-	OutputIndex  int    `json:"output_index"`
-	Status       int    `json:"status"`
-	Stream       bool   `json:"stream"`
-}
-
 func writeError(w http.ResponseWriter, ferr *model.FrameworkError) {
 	status := ferr.Status
 	if status == 0 {
@@ -104,21 +92,6 @@ func writeError(w http.ResponseWriter, ferr *model.FrameworkError) {
 		}
 	}
 	writeJSON(w, status, body)
-}
-
-func writeDecision(w http.ResponseWriter, result *service.ExecutionResult) {
-	writeJSON(w, http.StatusOK, decisionBody{
-		MockPhase:    "B",
-		Placeholder:  true,
-		ScriptID:     result.ScriptID,
-		Protocol:     result.Protocol,
-		RequestCount: result.RequestCount,
-		OutputCount:  result.OutputCount,
-		RoundIndex:   result.RoundIndex,
-		OutputIndex:  result.OutputIndex,
-		Status:       result.Status,
-		Stream:       result.Stream,
-	})
 }
 
 func takeString(details map[string]any, key string) string {

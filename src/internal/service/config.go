@@ -15,9 +15,8 @@ import (
 type UsageNumber struct {
 	Literal int64
 	Ref     *SystemKey
-	// Fallback 是外层（剧本 config.usage / server 默认）已解析出的字面值：
-	// output.config.usage 用系统 key 引用时不支持 default，键缺失即回退到外层。
-	Fallback *int64
+	// Default 是引用键缺失时使用的默认值；与「子字段未声明回退外层字面值」不同。
+	Default *int64
 }
 
 // Dynamic 表示该字段需要在 prepare 阶段读取系统 key。
@@ -166,12 +165,6 @@ func applyDynamicUsage(usage *EffectiveUsage, cfg *model.UsageOverride) error {
 		if err != nil {
 			return err
 		}
-		if number.Ref != nil {
-			// 外层永远是静态字面量（剧本 config.usage 或 server 默认），
-			// 运行期键缺失时回退到它。
-			outer := *field.slot()
-			number.Fallback = &outer.Literal
-		}
 		*field.slot() = number
 	}
 	return nil
@@ -207,13 +200,25 @@ func compileUsageNumber(raw *model.Value, path string) (UsageNumber, error) {
 		if err != nil {
 			return UsageNumber{}, &model.FieldError{Path: fieldPath(path), Msg: err.Error()}
 		}
+		number := UsageNumber{Ref: compiled}
 		if ref.Default != nil {
-			return UsageNumber{}, &model.FieldError{
-				Path: fieldPath(path),
-				Msg:  "default is not supported for usage fields; a missing usage value falls back to the outer layer",
+			node := ref.Default.Node
+			if node == nil || node.Kind != yaml.ScalarNode || node.Tag != "!!int" {
+				return UsageNumber{}, &model.FieldError{
+					Path: fieldPath(path),
+					Msg:  "default must be a non-negative integer",
+				}
 			}
+			value, err := strconv.ParseInt(node.Value, 10, 64)
+			if err != nil || value < 0 {
+				return UsageNumber{}, &model.FieldError{
+					Path: fieldPath(path),
+					Msg:  fmt.Sprintf("default must be a non-negative integer, got %s", node.Value),
+				}
+			}
+			number.Default = &value
 		}
-		return UsageNumber{Ref: compiled}, nil
+		return number, nil
 	}
 	return UsageNumber{}, &model.FieldError{Path: fieldPath(path), Msg: "must be an integer or a system key reference"}
 }
