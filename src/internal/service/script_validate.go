@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 
@@ -146,45 +147,68 @@ func ValidateScriptNode(file string, doc *yaml.Node) error {
 	return nil
 }
 
-// ValidateScriptSemantics 校验已解码剧本的字段值：version、id、config、
-// tool_calls 与 error 的必填约束。
-func ValidateScriptSemantics(file, relPath string, script *model.Script) error {
+// ValidateScriptSemantics 校验已解码剧本的字段值，并在原始 YAML 节点上定位
+// 出错位置：错误同时带文件、行列号（能定位时）与字段路径。
+func ValidateScriptSemantics(file string, doc *yaml.Node, script *model.Script) error {
+	root := rootOf(doc, file)
+
+	versionNode, hasVersion := utils.Field(root, "version")
+	if !hasVersion {
+		return utils.NewPositionError(file, root, "version", "version is required")
+	}
 	if script.Version != constants.SchemaVersion {
-		return fmt.Errorf("%s: version must be the integer %d, got %d", file, constants.SchemaVersion, script.Version)
+		return utils.NewPositionError(file, versionNode, "version",
+			fmt.Sprintf("version must be the integer %d, got %d", constants.SchemaVersion, script.Version))
+	}
+
+	idNode, hasID := utils.Field(root, "id")
+	if !hasID {
+		return utils.NewPositionError(file, root, "id", "id is required")
 	}
 	if !scriptIDPattern.MatchString(script.ID) {
-		return fmt.Errorf("%s: id %q must match %s", file, script.ID, constants.ScriptIDPattern)
+		return utils.NewPositionError(file, idNode, "id",
+			fmt.Sprintf("id %q must match %s", script.ID, constants.ScriptIDPattern))
 	}
+
 	if err := model.ValidateScriptConfig(script.Config); err != nil {
-		return fmt.Errorf("%s: %v", file, err)
+		return locateFieldError(file, firstNonNil(utils.Lookup(root, "config"), root), "config", err)
 	}
-	for i, assertion := range script.Assert {
-		if err := validateAssertionShape(assertion); err != nil {
-			return fmt.Errorf("%s: assert[%d]: %v", file, i, err)
+
+	for i := range script.Assert {
+		if msg := assertionShapeError(script.Assert[i]); msg != "" {
+			return utils.NewPositionError(file, utils.Lookup(root, "assert", i),
+				fmt.Sprintf("assert[%d]", i), msg)
 		}
 	}
 
-	for i, round := range script.Rounds {
+	for i := range script.Rounds {
+		round := &script.Rounds[i]
 		roundPath := fmt.Sprintf("rounds[%d]", i)
+		roundNode := utils.Lookup(root, "rounds", i)
 		if round.Input != nil {
-			for j, assertion := range round.Input.Assert {
-				if err := validateAssertionShape(assertion); err != nil {
-					return fmt.Errorf("%s: %s.input.assert[%d]: %v", file, roundPath, j, err)
+			for j := range round.Input.Assert {
+				if msg := assertionShapeError(round.Input.Assert[j]); msg != "" {
+					return utils.NewPositionError(file, utils.Lookup(roundNode, "input", "assert", j),
+						fmt.Sprintf("%s.input.assert[%d]", roundPath, j), msg)
 				}
 			}
 		}
 		if round.Output != nil {
-			if err := validateOutputShape(round.Output); err != nil {
-				return fmt.Errorf("%s: %s.output: %v", file, roundPath, err)
+			outNode, _ := utils.Field(roundNode, "output")
+			if err := validateOutputAt(file, outNode, roundPath+".output", round.Output); err != nil {
+				return err
 			}
 		}
 		for j := range round.Outputs {
-			if err := validateOutputShape(&round.Outputs[j]); err != nil {
-				return fmt.Errorf("%s: %s.outputs[%d]: %v", file, roundPath, j, err)
+			outNode := utils.Lookup(roundNode, "outputs", j)
+			outPath := fmt.Sprintf("%s.outputs[%d]", roundPath, j)
+			if err := validateOutputAt(file, outNode, outPath, &round.Outputs[j]); err != nil {
+				return err
 			}
-			for k, condition := range round.Outputs[j].When {
-				if err := validateAssertionShape(condition); err != nil {
-					return fmt.Errorf("%s: %s.outputs[%d].when[%d]: %v", file, roundPath, j, k, err)
+			for k := range round.Outputs[j].When {
+				if msg := assertionShapeError(round.Outputs[j].When[k]); msg != "" {
+					return utils.NewPositionError(file, utils.Lookup(outNode, "when", k),
+						fmt.Sprintf("%s.when[%d]", outPath, k), msg)
 				}
 			}
 		}
@@ -192,34 +216,78 @@ func ValidateScriptSemantics(file, relPath string, script *model.Script) error {
 	return nil
 }
 
-func validateOutputShape(out *model.Output) error {
+// DuplicateIDError 在重复 id 场景下给出后出现文件 id 节点的位置。
+func DuplicateIDError(file string, doc *yaml.Node, id, previousRelPath string) error {
+	idNode := utils.Lookup(utils.Root(doc), "id")
+	return utils.NewPositionError(file, idNode, "id",
+		fmt.Sprintf("duplicate script id %q (already defined in %s)", id, previousRelPath))
+}
+
+// validateOutputAt 校验单个 output 的字段值，错误定位到具体节点。
+func validateOutputAt(file string, outNode *yaml.Node, path string, out *model.Output) error {
 	if err := model.ValidateOutputConfig(out.Config); err != nil {
-		return err
+		return locateFieldError(file, firstNonNil(utils.Lookup(outNode, "config"), outNode), path+".config", err)
 	}
-	for i, call := range out.ToolCalls {
-		if call.Name == "" {
-			return fmt.Errorf("tool_calls[%d].name must be a non-empty string", i)
+	for k := range out.ToolCalls {
+		if out.ToolCalls[k].Name == "" {
+			return utils.NewPositionError(file, utils.Lookup(outNode, "tool_calls", k, "name"),
+				fmt.Sprintf("%s.tool_calls[%d].name", path, k), "name must be a non-empty string")
 		}
-		if call.Arguments.Node == nil {
-			return fmt.Errorf("tool_calls[%d].arguments is required", i)
+		if out.ToolCalls[k].Arguments.Node == nil {
+			return utils.NewPositionError(file, utils.Lookup(outNode, "tool_calls", k),
+				fmt.Sprintf("%s.tool_calls[%d]", path, k), "arguments is required")
 		}
 	}
-	if out.Error != nil {
-		if out.Error.Message == nil {
-			return fmt.Errorf("error.message is required")
+	if out.Error != nil && out.Error.Message == nil {
+		return utils.NewPositionError(file, firstNonNil(utils.Lookup(outNode, "error"), outNode),
+			path+".error", "error.message is required")
+	}
+	return nil
+}
+
+func assertionShapeError(a model.Assertion) string {
+	if a.Key == "" {
+		return "key is required"
+	}
+	if a.Op == "" {
+		return "op is required"
+	}
+	return ""
+}
+
+// locateFieldError 把 model.FieldError 的字段路径映射到原始 YAML 节点位置。
+// base 是路径起点，basePath 是起点在配置树中的展示路径。
+func locateFieldError(file string, base *yaml.Node, basePath string, err error) error {
+	var fe *model.FieldError
+	if !errors.As(err, &fe) {
+		return utils.NewPositionError(file, base, basePath, err.Error())
+	}
+	shown := basePath
+	for _, segment := range fe.Path {
+		switch v := segment.(type) {
+		case string:
+			shown = utils.JoinPath(shown, v)
+		case int:
+			shown = fmt.Sprintf("%s[%d]", shown, v)
+		}
+	}
+	return utils.NewPositionError(file, firstNonNil(utils.Lookup(base, fe.Path...), base), shown, fe.Msg)
+}
+
+func firstNonNil(nodes ...*yaml.Node) *yaml.Node {
+	for _, n := range nodes {
+		if n != nil {
+			return n
 		}
 	}
 	return nil
 }
 
-func validateAssertionShape(a model.Assertion) error {
-	if a.Key == "" {
-		return fmt.Errorf("key is required")
+func rootOf(doc *yaml.Node, file string) *yaml.Node {
+	if root := utils.Root(doc); root != nil {
+		return root
 	}
-	if a.Op == "" {
-		return fmt.Errorf("op is required")
-	}
-	return nil
+	return &yaml.Node{Line: 1, Column: 1, Tag: "!!map"}
 }
 
 func checkProhibited(file string, node *yaml.Node, path string, fields map[string]*yaml.Node) error {

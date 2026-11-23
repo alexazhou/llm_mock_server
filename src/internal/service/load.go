@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/alexazhou/llm_mock_server/internal/model"
 	"github.com/alexazhou/llm_mock_server/internal/utils"
 )
@@ -32,12 +34,15 @@ func Load(configPath string) (*Loaded, error) {
 		return nil, fmt.Errorf("%s: %w", absConfig, err)
 	}
 
-	var server model.ServerConfig
-	if err := utils.DecodeStrict(data, absConfig, &server); err != nil {
-		return nil, err
-	}
 	doc, err := utils.DecodeSingleDocument(data, absConfig)
 	if err != nil {
+		return nil, err
+	}
+	if err := ValidateServerNode(absConfig, doc); err != nil {
+		return nil, err
+	}
+	var server model.ServerConfig
+	if err := utils.DecodeStrictInto(data, absConfig, doc, &server); err != nil {
 		return nil, err
 	}
 	if err := NewNullRejecter(nil).Check(absConfig, doc, ""); err != nil {
@@ -46,7 +51,7 @@ func Load(configPath string) (*Loaded, error) {
 
 	resolved, err := server.Resolve()
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", absConfig, err)
+		return nil, locateFieldError(absConfig, utils.Root(doc), "", err)
 	}
 	scriptsDir := resolved.ScriptsDir
 	if !filepath.IsAbs(scriptsDir) {
@@ -64,6 +69,66 @@ func Load(configPath string) (*Loaded, error) {
 		ScriptsDir: scriptsDir,
 		Registry:   registry,
 	}, nil
+}
+
+// ValidateServerNode 在原始节点上校验 server.yaml 的必填项与标量类型，
+// 保证「listen 写成整数」这类错误也能给出文件、行列号与字段名。
+func ValidateServerNode(file string, doc *yaml.Node) error {
+	root := utils.Root(doc)
+	if root == nil || root.Kind != yaml.MappingNode {
+		return utils.NewPositionError(file, root, "", "server.yaml root must be a mapping")
+	}
+	versionNode, ok := utils.Field(root, "version")
+	if !ok {
+		return utils.NewPositionError(file, root, "version", "version is required")
+	}
+	if versionNode.Tag != "!!int" {
+		return utils.NewPositionError(file, versionNode, "version", "version must be an integer (1)")
+	}
+	for _, field := range []string{"listen", "scripts_dir"} {
+		if n, ok := utils.Field(root, field); ok && n.Tag != "!!str" {
+			return utils.NewPositionError(file, n, field, fmt.Sprintf("%s must be a string", field))
+		}
+	}
+	for _, section := range []string{"config", "transport", "runtime", "capture"} {
+		n, ok := utils.Field(root, section)
+		if !ok {
+			continue
+		}
+		if n.Tag == "!!null" {
+			return utils.NewPositionError(file, n, section, fmt.Sprintf("field %q must not be null", section))
+		}
+		if n.Kind != yaml.MappingNode {
+			return utils.NewPositionError(file, n, section, fmt.Sprintf("%s must be a mapping", section))
+		}
+	}
+	intFields := []struct{ section, key string }{
+		{"runtime", "max_active_requests"},
+		{"runtime", "max_output_bytes"},
+		{"runtime", "max_fixture_bytes"},
+		{"runtime", "max_generated_events"},
+		{"runtime", "max_write_units"},
+		{"capture", "capacity"},
+		{"capture", "max_body_bytes"},
+		{"capture", "max_total_bytes"},
+	}
+	for _, field := range intFields {
+		if n := utils.Lookup(root, field.section, field.key); n != nil && n.Tag != "!!int" {
+			return utils.NewPositionError(file, n, field.section+"."+field.key,
+				fmt.Sprintf("%s.%s must be an integer", field.section, field.key))
+		}
+	}
+	durationFields := []struct{ section, key string }{
+		{"transport", "read_header_timeout"},
+		{"runtime", "shutdown_timeout"},
+	}
+	for _, field := range durationFields {
+		if n := utils.Lookup(root, field.section, field.key); n != nil && n.Tag != "!!str" {
+			return utils.NewPositionError(file, n, field.section+"."+field.key,
+				fmt.Sprintf("%s.%s must be a duration string such as 5s", field.section, field.key))
+		}
+	}
+	return nil
 }
 
 // loadScripts 按字典序加载全部剧本并检查 id 唯一性。
@@ -96,11 +161,11 @@ func loadScripts(scriptsDir string) (*model.Registry, error) {
 		if err := NewNullRejecter(&script).Check(absPath, doc, ""); err != nil {
 			return nil, err
 		}
-		if err := ValidateScriptSemantics(absPath, rel, &script); err != nil {
+		if err := ValidateScriptSemantics(absPath, doc, &script); err != nil {
 			return nil, err
 		}
 		if prev, ok := seen[script.ID]; ok {
-			return nil, fmt.Errorf("%s: duplicate script id %q (already defined in %s)", absPath, script.ID, prev.RelPath)
+			return nil, DuplicateIDError(absPath, doc, script.ID, prev.RelPath)
 		}
 		entry := &model.Entry{RelPath: rel, AbsPath: absPath, Script: &script}
 		seen[script.ID] = entry

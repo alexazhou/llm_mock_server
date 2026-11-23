@@ -1,6 +1,7 @@
 package model
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -135,17 +136,31 @@ type Chunks struct {
 	Flush *bool `yaml:"flush"`
 }
 
+// FieldError 是一个带字段位置的配置校验错误。Path 是相对校验对象根的路径
+// （string 表示 mapping key，int 表示 sequence 下标），调用方据此在原始
+// YAML 节点上定位行列号，保证错误里既有字段路径也有节点位置。
+type FieldError struct {
+	Path []any
+	Msg  string
+}
+
+func (e *FieldError) Error() string { return e.Msg }
+
+func fieldErr(msg string, path ...any) *FieldError {
+	return &FieldError{Path: path, Msg: msg}
+}
+
 // ValidateScriptConfig 校验剧本顶层 config / server.config 的静态字段。
-// output.config 使用 ValidateOutputConfig，规则一致但范围更小。
+// 返回的 FieldError 路径相对 config 对象。
 func ValidateScriptConfig(cfg *ScriptConfig) error {
 	if cfg == nil {
 		return nil
 	}
 	if cfg.MaxBodyBytes != nil && *cfg.MaxBodyBytes <= 0 {
-		return fmt.Errorf("config.max_body_bytes must be a positive integer")
+		return fieldErr("max_body_bytes must be a positive integer", "max_body_bytes")
 	}
 	if cfg.Status != nil && (*cfg.Status < 200 || *cfg.Status > 599) {
-		return fmt.Errorf("config.status must be an integer between 200 and 599, got %d", *cfg.Status)
+		return fieldErr(fmt.Sprintf("status must be an integer between 200 and 599, got %d", *cfg.Status), "status")
 	}
 	if err := ValidateHeaders(cfg.Headers); err != nil {
 		return err
@@ -162,7 +177,7 @@ func ValidateOutputConfig(cfg *OutputConfig) error {
 		return nil
 	}
 	if cfg.Status != nil && (*cfg.Status < 200 || *cfg.Status > 599) {
-		return fmt.Errorf("output.config.status must be an integer between 200 and 599, got %d", *cfg.Status)
+		return fieldErr(fmt.Sprintf("status must be an integer between 200 and 599, got %d", *cfg.Status), "status")
 	}
 	return ValidateHeaders(cfg.Headers)
 }
@@ -173,18 +188,18 @@ func ValidateHeaders(headers map[string]string) error {
 	seen := make(map[string]string, len(headers))
 	for name, value := range headers {
 		if !isValidHeaderName(name) {
-			return fmt.Errorf("invalid header name %q", name)
+			return fieldErr(fmt.Sprintf("invalid header name %q", name), "headers", name)
 		}
 		if strings.ContainsAny(value, "\r\n") {
-			return fmt.Errorf("header %q value must not contain CR or LF", name)
+			return fieldErr(fmt.Sprintf("header %q value must not contain CR or LF", name), "headers", name)
 		}
 		canonical := canonicalHeaderName(name)
 		if prev, ok := seen[canonical]; ok {
-			return fmt.Errorf("header %q duplicates header %q (header names are case-insensitive)", name, prev)
+			return fieldErr(fmt.Sprintf("header %q duplicates header %q (header names are case-insensitive)", name, prev), "headers", name)
 		}
 		seen[canonical] = name
 		if isReservedHeader(canonical) {
-			return fmt.Errorf("header %q is reserved by the mock framework and cannot be configured", name)
+			return fieldErr(fmt.Sprintf("header %q is reserved by the mock framework and cannot be configured", name), "headers", name)
 		}
 	}
 	return nil
@@ -194,15 +209,19 @@ func validateUsage(u *Usage) error {
 	if u == nil {
 		return nil
 	}
-	fields := map[string]*int64{
-		"input_tokens":        u.InputTokens,
-		"output_tokens":       u.OutputTokens,
-		"cached_input_tokens": u.CachedInputTokens,
-		"reasoning_tokens":    u.ReasoningTokens,
+	fields := []struct {
+		name  string
+		value *int64
+	}{
+		{"input_tokens", u.InputTokens},
+		{"output_tokens", u.OutputTokens},
+		{"cached_input_tokens", u.CachedInputTokens},
+		{"reasoning_tokens", u.ReasoningTokens},
 	}
-	for name, v := range fields {
-		if v != nil && *v < 0 {
-			return fmt.Errorf("config.usage.%s must be a non-negative integer, got %d", name, *v)
+	for _, field := range fields {
+		if field.value != nil && *field.value < 0 {
+			return fieldErr(fmt.Sprintf("usage.%s must be a non-negative integer, got %d", field.name, *field.value),
+				"usage", field.name)
 		}
 	}
 	return nil
@@ -254,4 +273,14 @@ func isReservedHeader(canonical string) bool {
 		return true
 	}
 	return strings.HasPrefix(canonical, "Access-Control-Allow-")
+}
+
+// prefixFieldError 给 FieldError 的路径加上前缀；非 FieldError 原样返回。
+func prefixFieldError(err error, prefix ...any) error {
+	var fe *FieldError
+	if errors.As(err, &fe) {
+		path := append(append([]any{}, prefix...), fe.Path...)
+		return &FieldError{Path: path, Msg: fe.Msg}
+	}
+	return err
 }

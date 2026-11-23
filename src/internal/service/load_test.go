@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/alexazhou/llm_mock_server/internal/utils"
 )
 
 const examplesConfig = "../../../doc/design/2026-11-17-configurable-go-mock-server/examples/server.yaml"
@@ -219,5 +221,107 @@ func TestRenamingScriptFileKeepsURLs(t *testing.T) {
 	if loadedFirst.Registry.Summaries()[0] != loadedSecond.Registry.Summaries()[0] {
 		t.Fatalf("renaming the file must not change the URLs: %+v vs %+v",
 			loadedFirst.Registry.Summaries()[0], loadedSecond.Registry.Summaries()[0])
+	}
+}
+
+// TestSemanticErrorsCarryNodePosition 锁死「语义校验类错误也必须带节点位置」：
+// 每条都必须能取出 *utils.PositionError，且 Line>0、Path 非空。
+func TestSemanticErrorsCarryNodePosition(t *testing.T) {
+	cases := []struct {
+		name      string
+		server    string
+		script    string
+		wantInMsg string
+		wantPath  string
+	}{
+		{
+			name:      "id regex",
+			script:    "version: 1\nid: Bad-ID\nrounds:\n  - output: {}\n",
+			wantInMsg: `id "Bad-ID" must match`,
+			wantPath:  "id",
+		},
+		{
+			name:      "version required",
+			script:    "id: a\nrounds:\n  - output: {}\n",
+			wantInMsg: "version is required",
+			wantPath:  "version",
+		},
+		{
+			name:      "config status range",
+			script:    "version: 1\nid: a\nconfig:\n  status: 600\nrounds:\n  - output: {}\n",
+			wantInMsg: "between 200 and 599",
+			wantPath:  "config.status",
+		},
+		{
+			name:      "reserved header",
+			script:    "version: 1\nid: a\nconfig:\n  headers:\n    Content-Length: \"1\"\nrounds:\n  - output: {}\n",
+			wantInMsg: "reserved by the mock framework",
+			wantPath:  "config.headers.Content-Length",
+		},
+		{
+			name:      "tool call name",
+			script:    "version: 1\nid: a\nrounds:\n  - outputs:\n      - when:\n          - key: request.count\n            op: eq\n            expected: 2\n        tool_calls:\n          - name: \"\"\n            arguments: {}\n      - content: ok\n",
+			wantInMsg: "name must be a non-empty string",
+			wantPath:  "rounds[0].outputs[0].tool_calls[0].name",
+		},
+		{
+			name:      "duplicate id across files",
+			script:    "version: 1\nid: same\nrounds:\n  - output: {}\n",
+			wantInMsg: "duplicate script id",
+			wantPath:  "id",
+		},
+		{
+			name:      "server version not 1",
+			server:    "version: 2\n",
+			wantInMsg: "version must be the integer 1",
+			wantPath:  "version",
+		},
+		{
+			name:      "server version missing",
+			server:    "listen: 127.0.0.1:9999\n",
+			wantInMsg: "version is required",
+			wantPath:  "version",
+		},
+		{
+			name:      "server listen not a string",
+			server:    "version: 1\nlisten: 9999\n",
+			wantInMsg: "listen must be a string",
+			wantPath:  "listen",
+		},
+		{
+			name:      "server runtime not positive",
+			server:    "version: 1\nruntime:\n  max_active_requests: 0\n",
+			wantInMsg: "must be a positive integer",
+			wantPath:  "runtime.max_active_requests",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			scripts := map[string]string{"a.yaml": tt.script}
+			if tt.name == "duplicate id across files" {
+				scripts = map[string]string{"a.yaml": tt.script, "b.yaml": tt.script}
+			}
+			configPath := writeFixture(t, tt.server, scripts)
+			_, err := Load(configPath)
+			if err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			posErr, ok := err.(*utils.PositionError)
+			if !ok {
+				t.Fatalf("expected *utils.PositionError carrying position, got %T: %v", err, err)
+			}
+			if posErr.Line <= 0 {
+				t.Fatalf("expected line number, got %d (%v)", posErr.Line, err)
+			}
+			if posErr.Path != tt.wantPath {
+				t.Fatalf("expected path %q, got %q (%v)", tt.wantPath, posErr.Path, err)
+			}
+			if !strings.Contains(err.Error(), tt.wantInMsg) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tt.wantInMsg)
+			}
+			if !strings.Contains(err.Error(), ".yaml:") {
+				t.Fatalf("error %q should contain file:line", err.Error())
+			}
+		})
 	}
 }

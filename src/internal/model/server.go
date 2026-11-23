@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/alexazhou/llm_mock_server/internal/constants"
@@ -89,7 +90,7 @@ func (s *ServerConfig) Resolve() (*ResolvedServer, error) {
 		return nil, fmt.Errorf("server config is missing")
 	}
 	if s.Version != constants.SchemaVersion {
-		return nil, fmt.Errorf("version must be the integer %d, got %d", constants.SchemaVersion, s.Version)
+		return nil, fieldErr(fmt.Sprintf("version must be the integer %d, got %d", constants.SchemaVersion, s.Version), "version")
 	}
 
 	listen := s.Listen
@@ -98,11 +99,11 @@ func (s *ServerConfig) Resolve() (*ResolvedServer, error) {
 	}
 	host, port, err := net.SplitHostPort(listen)
 	if err != nil {
-		return nil, fmt.Errorf("listen %q must be a host:port address", listen)
+		return nil, fieldErr(fmt.Sprintf("listen %q must be a host:port address", listen), "listen")
 	}
 	portNum, err := strconv.Atoi(port)
 	if err != nil || portNum < 1 || portNum > 65535 {
-		return nil, fmt.Errorf("listen %q must use a port between 1 and 65535", listen)
+		return nil, fieldErr(fmt.Sprintf("listen %q must use a port between 1 and 65535", listen), "listen")
 	}
 
 	scriptsDir := s.ScriptsDir
@@ -150,7 +151,8 @@ func (s *ServerConfig) Resolve() (*ResolvedServer, error) {
 				continue
 			}
 			if *field.value <= 0 {
-				return nil, fmt.Errorf("%s must be a positive integer, got %d", field.name, *field.value)
+				return nil, fieldErr(fmt.Sprintf("%s must be a positive integer, got %d", field.name, *field.value),
+					"runtime", strings.TrimPrefix(field.name, "runtime."))
 			}
 			*field.dst = *field.value
 		}
@@ -158,26 +160,26 @@ func (s *ServerConfig) Resolve() (*ResolvedServer, error) {
 	if c := s.Capture; c != nil {
 		if c.Capacity != nil {
 			if *c.Capacity <= 0 {
-				return nil, fmt.Errorf("capture.capacity must be a positive integer, got %d", *c.Capacity)
+				return nil, fieldErr(fmt.Sprintf("capture.capacity must be a positive integer, got %d", *c.Capacity), "capture", "capacity")
 			}
 			resolved.CaptureCapacity = *c.Capacity
 		}
 		if c.MaxBodyBytes != nil {
 			if *c.MaxBodyBytes < 0 {
-				return nil, fmt.Errorf("capture.max_body_bytes must be a non-negative integer, got %d", *c.MaxBodyBytes)
+				return nil, fieldErr(fmt.Sprintf("capture.max_body_bytes must be a non-negative integer, got %d", *c.MaxBodyBytes), "capture", "max_body_bytes")
 			}
 			resolved.CaptureMaxBodyBytes = *c.MaxBodyBytes
 		}
 		if c.MaxTotalBytes != nil {
 			if *c.MaxTotalBytes <= 0 {
-				return nil, fmt.Errorf("capture.max_total_bytes must be a positive integer, got %d", *c.MaxTotalBytes)
+				return nil, fieldErr(fmt.Sprintf("capture.max_total_bytes must be a positive integer, got %d", *c.MaxTotalBytes), "capture", "max_total_bytes")
 			}
 			resolved.CaptureMaxTotalBytes = *c.MaxTotalBytes
 		}
 	}
 
 	if err := ValidateScriptConfig(s.Config); err != nil {
-		return nil, fmt.Errorf("%v", err)
+		return nil, prefixFieldError(err, "config")
 	}
 	resolved.ScriptConfig = resolveScriptDefaults(s.Config)
 	return resolved, nil
