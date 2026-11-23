@@ -54,6 +54,8 @@ type PreparedOutput struct {
 
 	// Empty 表示四类输出字段全部省略，响应 body 必须是 0 字节。
 	Empty bool
+	// IncludeUsage 是 OpenAI 流式请求的 stream_options.include_usage。
+	IncludeUsage bool
 
 	ResponseID string
 	Created    int64
@@ -163,22 +165,36 @@ func PrepareOutput(ctx *model.RequestContext, output *CompiledOutput, maxOutputB
 		prepared.Usage = usage
 	}
 
-	// M3 之前的显式边界：流式记录尚未实现时必须在提交响应头之前失败，
-	// 绝不能让客户端拿到「200 + 空 body」这种看起来正常的响应。
-	if prepared.Stream {
-		return nil, prepareFailureOf(prepareError(
-			"streaming output is not implemented yet", ctx), ctx)
-	}
 	if ferr := validateResolvedOutputBytes(prepared, maxOutputBytes); ferr != nil {
 		return nil, prepareFailureOf(ferr, ctx)
 	}
 	if ferr := validateProtocolCapabilities(prepared); ferr != nil {
 		return nil, prepareFailureOf(ferr, ctx)
 	}
+	if prepared.Stream {
+		if ferr := validateStreamTargets(prepared); ferr != nil {
+			return nil, prepareFailureOf(ferr, ctx)
+		}
+	}
 
+	prepared.IncludeUsage = requestIncludesUsage(ctx.JSONBody)
 	prepared.ResponseID = NewResponseID(ctx.Protocol)
 	prepared.Created = time.Now().Unix()
 	return prepared, nil
+}
+
+// requestIncludesUsage 读取 OpenAI 流式的 stream_options.include_usage。
+func requestIncludesUsage(body any) bool {
+	object, ok := body.(map[string]any)
+	if !ok {
+		return false
+	}
+	options, ok := object["stream_options"].(map[string]any)
+	if !ok {
+		return false
+	}
+	value, ok := options["include_usage"].(bool)
+	return ok && value
 }
 
 // resolveStreamMode 把 auto / true / false 落成具体模式。

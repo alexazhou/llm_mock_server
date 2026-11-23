@@ -52,8 +52,7 @@ type responseWriter struct {
 // run 规划并执行传输操作。
 func (w *responseWriter) run(ctx context.Context, prepared *PreparedOutput) error {
 	if prepared.Stream {
-		// prepare 阶段已经拒绝流式；这里是防御性兜底（M3 会实现流式记录）。
-		return errStreamingNotImplemented
+		return w.runStream(ctx, prepared)
 	}
 	ops, err := planNonStream(prepared)
 	if err != nil {
@@ -95,8 +94,111 @@ func (w *responseWriter) run(ctx context.Context, prepared *PreparedOutput) erro
 // headerContentLength 是框架自行计算的保留 header 名（剧本不允许声明）。
 const headerContentLength = "Content-Length"
 
-// errStreamingNotImplemented 是 M2 的临时边界：流式记录在 M3 接入。
-var errStreamingNotImplemented = prepareError("streaming output is not implemented yet", nil)
+// ContentTypeSSE 是流式响应的默认 Content-Type；显式 headers 可以覆盖。
+const ContentTypeSSE = "text/event-stream"
+
+// runStream 按 steps 顺序生成并写出协议记录：游标只前移，raw / heartbeat 不推进游标。
+func (w *responseWriter) runStream(ctx context.Context, prepared *PreparedOutput) error {
+	writer := newStreamWriter(prepared)
+	geometry := geometryOf(prepared)
+	for i := range prepared.Steps {
+		step := &prepared.Steps[i]
+		switch step.Op {
+		case OpWait:
+			if err := sleep(ctx, writeOp{kind: opSleep, duration: time.Duration(step.Duration), infinite: step.Infinite}); err != nil {
+				return err
+			}
+		case OpEnd:
+			w.commitStreamHeaders()
+			if w.flusher != nil {
+				w.flusher.Flush()
+			}
+			return nil
+		case OpSend:
+			if step.Target != nil && step.Target.Block == BlockHeaders {
+				w.commitStreamHeaders()
+				if w.flusher != nil {
+					w.flusher.Flush()
+				}
+				continue
+			}
+			switch step.Source {
+			case SourceRaw:
+				if err := w.writeStreamBytes(step.Raw); err != nil {
+					return err
+				}
+			case SourceHeartbeat:
+				if err := w.writeStreamBytes(heartbeatBytes(step, lineEndingBytes(prepared.LineEnding))); err != nil {
+					return err
+				}
+			case SourceError:
+				for _, record := range writer.streamErrorRecords() {
+					if err := w.writeStreamBytes(record); err != nil {
+						return err
+					}
+				}
+			default:
+				bound := streamPos{stage: stageStreamEnd}
+				if step.Target != nil {
+					position, err := targetPosition(prepared.Protocol, geometry, step.Target)
+					if err != nil {
+						return err
+					}
+					bound = position
+				}
+				records, err := writer.advanceTo(bound)
+				if err != nil {
+					return err
+				}
+				for _, record := range records {
+					if err := w.writeStreamBytes(record); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+	w.commitStreamHeaders()
+	if w.flusher != nil {
+		w.flusher.Flush()
+	}
+	return nil
+}
+
+// writeStreamBytes 写一条记录并按 config.flush 决定是否立即刷新。
+func (w *responseWriter) writeStreamBytes(record []byte) error {
+	if len(record) == 0 {
+		return nil
+	}
+	w.commitStreamHeaders()
+	if _, err := w.w.Write(record); err != nil {
+		return err
+	}
+	if w.flush && w.flusher != nil {
+		w.flusher.Flush()
+	}
+	return nil
+}
+
+// commitStreamHeaders 提交流式响应头：默认 Content-Type 是 text/event-stream。
+func (w *responseWriter) commitStreamHeaders() {
+	if w.committed {
+		return
+	}
+	w.committed = true
+	header := w.w.Header()
+	for name, value := range w.headers {
+		header.Set(name, value)
+	}
+	if header.Get("Content-Type") == "" {
+		header.Set("Content-Type", ContentTypeSSE)
+	}
+	// 流式响应块间可能间隔很久，禁用反向代理缓冲。
+	if header.Get("X-Accel-Buffering") == "" {
+		header.Set("X-Accel-Buffering", "no")
+	}
+	w.w.WriteHeader(w.status)
+}
 
 // planNonStream 把 steps 展开成传输操作：send 先按 chunks 切分，再逐片写入。
 func planNonStream(prepared *PreparedOutput) ([]writeOp, error) {

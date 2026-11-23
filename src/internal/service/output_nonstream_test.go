@@ -539,20 +539,3 @@ rounds:
 		t.Fatalf("prepare error must carry the consumed request_count, got %#v", ferr.Details)
 	}
 }
-
-// TestStreamingFailsLoudlyBeforeCommit 验证流式未实现时不会返回「200 + 空 body」，
-// 而是在提交响应头之前就以 prepare 错误失败。
-func TestStreamingFailsLoudlyBeforeCommit(t *testing.T) {
-	script := `version: 1
-id: probe
-config:
-  stream: true
-rounds:
-  - output:
-      content: hello
-`
-	_, ferr := prepareFor(t, script, constants.ProtocolOpenAI, `{"model":"m"}`)
-	if ferr == nil || ferr.Code != model.CodeOutputPrepareError || ferr.Status != 500 {
-		t.Fatalf("streaming must fail loudly before commit, got %v", ferr)
-	}
-}
