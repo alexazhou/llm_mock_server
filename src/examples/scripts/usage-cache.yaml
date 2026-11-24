@@ -1,0 +1,19 @@
+version: 1
+id: usage-cache
+# usage 示例：四个 usage 数字字段里，cached_input_tokens 从请求动态回填，
+# 其余为静态值；请求未带 cached_tokens 时用 default: 0。
+config:
+  stream: false
+  usage:
+    input_tokens: 120
+    output_tokens: 24
+  usage_mode: emit
+rounds:
+  - output:
+      config:
+        usage:
+          cached_input_tokens:
+            key: request.json_body
+            path: $.cached_tokens
+            default: 0
+      content: 带 prompt cache 统计的响应。

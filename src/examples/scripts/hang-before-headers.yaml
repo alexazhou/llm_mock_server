@@ -1,0 +1,11 @@
+version: 1
+id: hang-before-headers
+# 异常传输：不发送任何字节，直接无限等待 ⇒ 客户端连响应头都拿不到（头前挂起）。
+config:
+  stream: true
+rounds:
+  - output:
+      content: 这段内容永远不会被发送。
+      steps:
+        - op: wait
+          duration: infinite

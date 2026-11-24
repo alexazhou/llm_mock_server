@@ -1,0 +1,16 @@
+version: 1
+id: fail-second
+# 同一 round 多 outputs：只有第 2 次已接受请求失败，其余正常。
+rounds:
+  - outputs:
+      - when:
+          - name: second_attempt
+            key: request.count
+            op: eq
+            expected: 2
+        config:
+          status: 500
+        error:
+          type: server_error
+          message: Failed on the second attempt
+      - content: 正常返回。

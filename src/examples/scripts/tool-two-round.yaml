@@ -1,0 +1,31 @@
+version: 1
+id: tool-two-round
+# 工具调用两轮示例：
+# 第 1 轮省略 tool_calls[].id ⇒ 框架生成协议合法 ID，arguments 的 city 由请求动态引用；
+# 第 2 轮把历史 assistant tool call 的 id 回显到 content，便于断言两轮 ID 一致。
+config:
+  stream: false
+assert:
+  # 只断言协议无关的字段：这份剧本只在 openai 协议下演示两轮，
+  # 但三条 URL 都会加载它，写死 $.messages 会让其它协议失败。
+  - name: method
+    key: request.method
+    op: eq
+    expected: POST
+rounds:
+  - output:
+      content: 我先查一下天气。
+      tool_calls:
+        - name: get_weather
+          arguments:
+            city:
+              key: request.json_body
+              path: $.messages[0].content
+              default: Beijing
+  - output:
+      content:
+        # 第 2 轮请求形如 messages[0]=user, [1]=assistant(tool_calls), [2]=tool，
+        # 这里回显历史 assistant tool call 的 id，便于断言两轮 ID 一致。
+        key: request.json_body
+        path: $.messages[1].tool_calls[0].id
+        default: no-tool-call-in-history

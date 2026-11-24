@@ -1,0 +1,15 @@
+version: 1
+id: slow-chunks
+# 慢速分片：整份发送序列按 5 字节切片，每片前等 120ms ⇒ 客户端可观测片间间隔。
+config:
+  stream: true
+  flush: true
+rounds:
+  - output:
+      content: 慢速分片响应内容
+      steps:
+        - op: send
+          chunks:
+            size: 5
+          interval: 120ms
+        - op: end

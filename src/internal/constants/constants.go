@@ -82,3 +82,20 @@ const (
 	ExitConfigError = 1
 	ExitUsageError  = 2
 )
+
+// 内置 Models 端点（技术设计 §8 / step3 E）：固定列表，不进入剧本 DSL，
+// 不参与任何剧本的 request.count，也不占用 max_active_requests。
+const (
+	ModelsPath       = "/models"
+	ModelsV1Path     = "/v1/models"
+	ModelsListObject = "list"
+	ModelsOwner      = "llm-mock-server"
+)
+
+// BuiltinModelIDs 是 Models 端点返回的固定 model id 列表（顺序稳定，便于判据比对）。
+var BuiltinModelIDs = []string{
+	"gpt-4o",
+	"gpt-4o-mini",
+	"claude-3-5-sonnet-latest",
+	"mock-tool-model",
+}

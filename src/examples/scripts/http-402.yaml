@@ -1,0 +1,11 @@
+version: 1
+id: http-402
+# 协议错误示例：HTTP 402（额度不足）。
+rounds:
+  - output:
+      config:
+        status: 402
+      error:
+        type: billing_error
+        code: insufficient_quota
+        message: You exceeded your current quota

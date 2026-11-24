@@ -38,6 +38,7 @@ func Routes(reg *model.Registry) []Route {
 func NewRouter(loaded *service.Loaded) *http.ServeMux {
 	executor := service.NewExecutor(loaded)
 	mux := http.NewServeMux()
+	registerModels(mux)
 	for _, route := range Routes(loaded.Registry) {
 		route := route
 		mux.HandleFunc(route.Path, func(w http.ResponseWriter, r *http.Request) {

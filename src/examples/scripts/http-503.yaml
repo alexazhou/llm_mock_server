@@ -1,0 +1,11 @@
+version: 1
+id: http-503
+# 协议错误示例：HTTP 503（上游不可用），常用于模拟重试前的失败。
+rounds:
+  - output:
+      config:
+        status: 503
+      error:
+        type: server_error
+        code: upstream_unavailable
+        message: Mock upstream unavailable

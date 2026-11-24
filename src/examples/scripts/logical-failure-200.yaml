@@ -1,0 +1,12 @@
+version: 1
+id: logical-failure-200
+# 逻辑失败示例：HTTP 200，但响应体内部是失败状态（Responses 的 status=failed、
+# Chat 的 finish_reason 异常等），用于测试调用方「HTTP 成功但业务失败」的处理。
+rounds:
+  - output:
+      config:
+        status: 200
+      error:
+        type: server_error
+        code: logical_failure
+        message: Generation failed after acceptance

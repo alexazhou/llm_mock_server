@@ -1,0 +1,21 @@
+version: 1
+id: heartbeat-interleaved
+# heartbeat 与正文交错：SSE comment 心跳既可单独成 send，也可与内容 send 交替。
+config:
+  stream: true
+rounds:
+  - output:
+      content: 心跳与正文交错。
+      steps:
+        - op: send
+          source: heartbeat
+          text: ping
+          count: 1
+        - op: send
+          target: content[:3]
+        - op: send
+          source: heartbeat
+          text: ping
+          count: 1
+        - op: send
+        - op: end

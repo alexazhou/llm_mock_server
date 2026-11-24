@@ -1,0 +1,16 @@
+version: 1
+id: tools-branch
+# 按 request 内容条件分支：请求带 tools 时返回工具调用，否则返回普通文本。
+rounds:
+  - outputs:
+      - when:
+          - name: has_tools
+            key: request.json_body
+            path: $.tools
+            op: length_gte
+            expected: 1
+        tool_calls:
+          - name: get_weather
+            arguments:
+              city: Beijing
+      - content: 没有可用工具，直接回答。

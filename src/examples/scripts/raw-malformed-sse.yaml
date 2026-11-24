@@ -1,0 +1,15 @@
+version: 1
+id: raw-malformed-sse
+# raw 输出示例：故意发送不合法的 SSE（缺 data 前缀、事件不完整），
+# 用于验证调用方的 SSE 解析容错。
+config:
+  stream: true
+  line_ending: lf
+rounds:
+  - output:
+      content: 占位正文（raw 剧本不会用到它）
+      steps:
+        - op: send
+          source: raw
+          text: "event: message_start\ndata: {\"broken\": \n\nevent: \n"
+        - op: end

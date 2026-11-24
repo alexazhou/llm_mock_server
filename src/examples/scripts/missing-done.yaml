@@ -1,0 +1,13 @@
+version: 1
+id: missing-done
+# 缺结束标记（OpenAI）：只发到 generation.end，不发 stream.end ⇒ 缺 [DONE]。
+# 走 /v1/messages 时同一剧本同样停在协议 generation 边界，便于复用。
+config:
+  stream: true
+rounds:
+  - output:
+      content: 缺 DONE 标记。
+      steps:
+        - op: send
+          target: generation.end
+        - op: end

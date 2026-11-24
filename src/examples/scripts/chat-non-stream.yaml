@@ -1,0 +1,31 @@
+version: 1
+id: chat-non-stream
+# 三协议单轮非流式示例：同一份 output 经 /mock/chat-non-stream/v1/ 下的
+# chat/completions、messages、responses 三个 URL 分别输出对应协议容器。
+config:
+  max_body_bytes: 8388608
+  read_body_timeout: 15s
+  status: 200
+  stream: false
+  usage:
+    input_tokens: 10
+    output_tokens: 15
+assert:
+  # 断言只使用协议无关的系统 key：同一份剧本要经三条协议 URL 访问，
+  # 写死 $.messages 会让 Responses 请求失败。
+  - name: method
+    key: request.method
+    op: eq
+    expected: POST
+  - name: has_json_body
+    key: request.json_body
+    op: type
+    expected: object
+  - name: stream_flag
+    key: request.stream
+    op: eq
+    expected: false
+rounds:
+  - output:
+      content: Hello! 需要我帮你分析这段请求吗？
+      reasoning: 先确认用户意图，再给出简短回应。

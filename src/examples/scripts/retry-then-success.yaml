@@ -1,0 +1,17 @@
+version: 1
+id: retry-then-success
+# 同一 round 多 outputs：第 1 次已接受请求返回 503，第 2 次及以后走 fallback 正常返回。
+# 用于验证「首次失败后重试成功」的调用方逻辑。
+rounds:
+  - outputs:
+      - when:
+          - name: first_attempt
+            key: request.count
+            op: eq
+            expected: 1
+        config:
+          status: 503
+        error:
+          type: server_error
+          message: Upstream temporarily unavailable, please retry
+      - content: 重试成功，这是正常响应。

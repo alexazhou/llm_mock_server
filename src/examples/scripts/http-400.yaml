@@ -1,0 +1,11 @@
+version: 1
+id: http-400
+# 协议错误示例：剧本可预期的 HTTP 400（属于剧本正常结果，不是 Mock 框架错误）。
+rounds:
+  - output:
+      config:
+        status: 400
+      error:
+        type: invalid_request_error
+        code: invalid_prompt
+        message: The prompt is too long for this model

@@ -1,0 +1,13 @@
+version: 1
+id: rst-mid-output
+# 异常传输：发出部分正文后用 end.mode=abort 主动断连（TCP RST），客户端看到连接被重置。
+config:
+  stream: true
+rounds:
+  - output:
+      content: 输出一半就被重置
+      steps:
+        - op: send
+          target: content[:5]
+        - op: end
+          mode: abort
