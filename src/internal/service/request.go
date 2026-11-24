@@ -20,18 +20,65 @@ type Executor struct {
 	Loaded   *Loaded
 	Counters *CounterStore
 	Capacity *Capacity
+	// Capture 是 capture 窗口；nil 表示不记录（单元测试可以省略）。
+	Capture *Capture
+	// InstanceID 是本进程的实例标识，同时用于 capture cursor 校验。
+	InstanceID string
 }
 
-// NewExecutor 基于加载结果构建执行器。
+// NewExecutor 基于加载结果构建执行器，并创建本进程的 capture 窗口。
 func NewExecutor(loaded *Loaded) *Executor {
+	instanceID := newInstanceID()
 	return &Executor{
-		Loaded:   loaded,
-		Counters: NewCounterStore(loaded.Registry),
-		Capacity: NewCapacity(loaded.Resolved.MaxActiveRequests),
+		Loaded:     loaded,
+		Counters:   NewCounterStore(loaded.Registry),
+		Capacity:   NewCapacity(loaded.Resolved.MaxActiveRequests),
+		Capture:    NewCapture(instanceID, loaded.Resolved.CaptureCapacity, loaded.Resolved.CaptureMaxBodyBytes, loaded.Resolved.CaptureMaxTotalBytes),
+		InstanceID: instanceID,
 	}
 }
 
-// ExecutionResult 是 B 阶段成功决策的结果，用于组装占位响应。
+// Execution 持有一次请求的活动租约：全局容量与剧本 active_requests 一直持有到
+// 响应写完（含 wait 挂起与 abort 断连），调用方必须在 WriteOutput 之后 Release。
+// 技术设计 §5.2 要求「body 读取、输入校验、有限/无限 wait 和 Hijack 连接存活
+// 期间都算活动请求」，因此不能在 Execute 返回时就释放。
+type Execution struct {
+	*ExecutionResult
+	recorder *requestRecorder
+	release  func()
+	released bool
+}
+
+// Release 释放容量与 active_requests；重复调用无副作用。
+func (x *Execution) Release() {
+	if x == nil || x.released {
+		return
+	}
+	x.released = true
+	if x.release != nil {
+		x.release()
+	}
+}
+
+// Finish 在响应写完后补齐 capture 记录的写入字节、结果分类与结束原因。
+func (x *Execution) Finish(outcome WriteOutcome) {
+	if x == nil || x.recorder == nil {
+		return
+	}
+	result := "output"
+	endReason := "completed"
+	switch {
+	case outcome.Aborted:
+		result = "aborted"
+		endReason = "abort"
+	case outcome.Err != nil:
+		result = "client_cancel"
+		endReason = "client_disconnect"
+	}
+	x.recorder.finish(result, nil, outcome.Written, endReason)
+}
+
+// ExecutionResult 是 B 阶段成功决策的结果，用于组装响应。
 type ExecutionResult struct {
 	ScriptID     string
 	Protocol     string
@@ -46,31 +93,48 @@ type ExecutionResult struct {
 	Prepared *PreparedOutput
 }
 
-// Execute 处理一次剧本请求。返回的 FrameworkError 由调用方按统一 envelope 输出。
-func (e *Executor) Execute(w http.ResponseWriter, r *http.Request, scriptID, protocol string) (*ExecutionResult, *model.FrameworkError) {
+// Execute 处理一次剧本请求。成功时返回持有活动租约的 Execution，调用方必须写完
+// 响应后 Release；失败时返回框架错误，capture 记录已结束且租约已释放。
+func (e *Executor) Execute(w http.ResponseWriter, r *http.Request, scriptID, protocol string) (*Execution, *model.FrameworkError) {
+	requestID := newRequestID()
+	recorder := newRequestRecorder(e.Capture, r, requestID, scriptID, protocol)
+
 	script, ok := e.Loaded.Compiled[scriptID]
 	if !ok {
-		return nil, model.NewFrameworkError(model.CodeScriptNotFound, "script "+scriptID+" is not registered")
+		ferr := model.NewFrameworkError(model.CodeScriptNotFound, "script "+scriptID+" is not registered")
+		recorder.finish("framework_error", ferr, 0, "script_not_found")
+		return nil, ferr
 	}
-	requestID := newRequestID()
 
 	// 容量控制必须在读取 body 之前：满则直接 503，不分配 request.count。
+	// 容量失败同样记入 capture 并标记为 framework error（技术设计 §5.3）。
 	if !e.Capacity.TryAcquire() {
 		ferr := model.NewFrameworkError(model.CodeCapacityExceeded, "too many active requests")
 		ferr.WithDetails("max_active_requests", e.Loaded.Resolved.MaxActiveRequests)
 		ferr.WithDetails("script_id", scriptID)
 		ferr.WithDetails("protocol", protocol)
 		ferr.WithDetails("request_id", requestID)
+		recorder.finish("framework_error", ferr, 0, "capacity_exceeded")
 		return nil, ferr
 	}
-	defer e.Capacity.Release()
 
 	counters := e.Counters.For(scriptID)
 	if counters == nil {
 		counters = NewScriptCounters()
 	}
 	counters.Acquire()
-	defer counters.Release()
+
+	execution := &Execution{recorder: recorder}
+	execution.release = func() {
+		counters.Release()
+		e.Capacity.Release()
+	}
+	// 失败路径统一收口：结束 capture 记录、释放租约后再返回。
+	fail := func(ferr *model.FrameworkError) (*Execution, *model.FrameworkError) {
+		recorder.finish("framework_error", ferr, 0, ferr.Code)
+		execution.Release()
+		return nil, ferr
+	}
 
 	ctx := &model.RequestContext{
 		RequestID: requestID,
@@ -85,18 +149,20 @@ func (e *Executor) Execute(w http.ResponseWriter, r *http.Request, scriptID, pro
 	limit, timeout := e.bodyLimits(script.Script)
 	body, ferr := readRequestBody(w, r, limit, timeout)
 	if ferr != nil {
-		return nil, withBase(ferr, ctx)
+		return fail(withBase(ferr, ctx))
 	}
+	recorder.setBody(body, nil)
 	ctx.BodyText = string(body)
 	if !utf8.Valid(body) {
-		return nil, withBase(model.NewFrameworkError(model.CodeInvalidJSON,
-			"request body must be valid UTF-8"), ctx)
+		return fail(withBase(model.NewFrameworkError(model.CodeInvalidJSON,
+			"request body must be valid UTF-8"), ctx))
 	}
 
 	parsed, ferr := ParseProtocolRequest(protocol, body)
 	if ferr != nil {
-		return nil, withBase(ferr, ctx)
+		return fail(withBase(ferr, ctx))
 	}
+	recorder.setBody(body, parsed.JSONBody)
 	ctx.JSONBody = parsed.JSONBody
 	ctx.Model = parsed.Model
 	ctx.Stream = parsed.Stream
@@ -106,31 +172,39 @@ func (e *Executor) Execute(w http.ResponseWriter, r *http.Request, scriptID, pro
 
 	round, ferr := LocateRound(script, ctx.OutputCount)
 	if ferr != nil {
-		return nil, withBase(ferr, ctx)
+		recorder.setOutputCount(ctx.OutputCount, 0)
+		return fail(withBase(ferr, ctx))
 	}
 	ctx.RoundIndex = round.Index
+	recorder.setOutputCount(ctx.OutputCount, round.Index)
 
-	if ferr := runAssertions(script.Assert, ctx, "assert"); ferr != nil {
-		return nil, ferr
+	results, ferr := runAssertions(script.Assert, ctx, "assert")
+	recorder.setAssertions(results)
+	if ferr != nil {
+		return fail(ferr)
 	}
-	if ferr := runAssertions(round.InputAssert, ctx, "round.input.assert"); ferr != nil {
-		return nil, ferr
+	results, ferr = runAssertions(round.InputAssert, ctx, "round.input.assert")
+	recorder.setAssertions(results)
+	if ferr != nil {
+		return fail(ferr)
 	}
 
 	// 输入断言全部通过后才分配 request.count。
 	count := counters.Next(protocol)
 	ctx.Count = &count
+	recorder.setRequestCount(count)
 
 	output, _, ferr := MatchOutput(ctx, round)
 	if ferr != nil {
-		return nil, withBase(ferr, ctx)
+		return fail(withBase(ferr, ctx))
 	}
+	recorder.setOutputIndex(output.Index)
 
 	prepared, ferr := PrepareOutput(ctx, output, e.Loaded.Resolved.MaxOutputBytes)
 	if ferr != nil {
-		return nil, ferr
+		return fail(ferr)
 	}
-	return &ExecutionResult{
+	execution.ExecutionResult = &ExecutionResult{
 		ScriptID:     scriptID,
 		Protocol:     protocol,
 		RequestID:    requestID,
@@ -141,7 +215,8 @@ func (e *Executor) Execute(w http.ResponseWriter, r *http.Request, scriptID, pro
 		Status:       prepared.Status,
 		Stream:       prepared.Stream,
 		Prepared:     prepared,
-	}, nil
+	}
+	return execution, nil
 }
 
 // bodyLimits 按剧本 config → server.config 默认值解析 body 上限与读取时限。
@@ -209,18 +284,19 @@ func abortRead(w http.ResponseWriter) {
 	_ = controller.SetReadDeadline(time.Now().Add(-time.Second))
 }
 
-// runAssertions 顺序执行一个断言列表，失败时返回带诊断的 mock_assertion_failed。
-func runAssertions(assertions []*CompiledAssertion, ctx *model.RequestContext, scope string) *model.FrameworkError {
+// runAssertions 顺序执行一个断言列表，返回逐条结果；失败时同时返回带诊断的
+// mock_assertion_failed（结果仍可用于 capture 记录）。
+func runAssertions(assertions []*CompiledAssertion, ctx *model.RequestContext, scope string) ([]AssertionResult, *model.FrameworkError) {
 	results, failed := EvaluateList(assertions, ctx)
 	if failed == nil {
-		return nil
+		return results, nil
 	}
 	ferr := model.NewFrameworkError(model.CodeAssertionFailed, "input assertion failed")
 	details := BaseDetails(ctx)
 	details["assertion"] = AssertionDetails(*failed)
 	details["assertions"] = assertResultsDetails(results)
 	ferr.Details = details
-	return ferr
+	return results, ferr
 }
 
 func assertResultsDetails(results []AssertionResult) []any {
@@ -253,4 +329,13 @@ func newRequestID() string {
 		return "req_unknown"
 	}
 	return "req_" + hex.EncodeToString(buf)
+}
+
+// newInstanceID 生成本进程的实例标识；capture cursor 只在同一实例内有效。
+func newInstanceID() string {
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return "ins_unknown"
+	}
+	return "ins_" + hex.EncodeToString(buf)
 }

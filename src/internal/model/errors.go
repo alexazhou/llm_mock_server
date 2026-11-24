@@ -18,6 +18,14 @@ const (
 	CodeCapacityExceeded       = "mock_capacity_exceeded"
 	CodeOutputPrepareError     = "mock_output_prepare_error"
 	CodeInternalError          = "mock_internal_error"
+
+	// D 阶段（capture 与管理接口）新增。技术设计 §8 只规定了行为，没有给出
+	// 这几个错误的码名与状态码取值，取值见交付报告的「文档空白」一节。
+	CodeCaptureWindowLost       = "mock_capture_window_lost"
+	CodeCaptureInstanceMismatch = "mock_capture_instance_mismatch"
+	CodeCaptureRecordTooLarge   = "mock_capture_record_too_large"
+	CodeCounterResetConflict    = "mock_counter_reset_conflict"
+	CodeCounterUnknownScript    = "mock_counter_unknown_script"
 )
 
 // FrameworkError 是响应头提交之前统一返回的结构化错误。
@@ -68,6 +76,13 @@ func StatusForCode(code string) int {
 	case CodeCapacityExceeded:
 		return http.StatusServiceUnavailable
 	case CodeOutputNotFound, CodeOutputConditionError, CodeOutputPrepareError, CodeInternalError:
+		return http.StatusInternalServerError
+	case CodeCaptureInstanceMismatch, CodeCounterUnknownScript:
+		return http.StatusBadRequest
+	case CodeCaptureWindowLost, CodeCounterResetConflict:
+		// fail closed：窗口不完整或有活动请求时不能让调用方把结果当成完整通过。
+		return http.StatusConflict
+	case CodeCaptureRecordTooLarge:
 		return http.StatusInternalServerError
 	}
 	return http.StatusInternalServerError

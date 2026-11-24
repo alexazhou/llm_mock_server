@@ -33,17 +33,35 @@ type writeOp struct {
 	infinite bool
 }
 
-// WriteOutput 执行 prepared output 的传输。返回错误表示客户端已断开或写失败，
-// 此时响应头可能已经提交，调用方不得再写框架错误 envelope。
-func WriteOutput(w http.ResponseWriter, r *http.Request, prepared *PreparedOutput) error {
+// WriteOutcome 是一次响应的传输结果：实际写入的字节数、是否按 end.mode=abort
+// 主动断连，以及写失败原因（客户端断开或写错误）。
+type WriteOutcome struct {
+	Written int64
+	Aborted bool
+	Err     error
+}
+
+// errAborted 是 end.mode=abort 的内部哨兵：断连是剧本的正常结果，不是写失败。
+var errAborted = errors.New("connection aborted by script")
+
+// WriteOutput 执行 prepared output 的传输，返回实际写入字节与断连/失败信息。
+// 返回后调用方不得再写响应；响应头可能已提交。
+func WriteOutput(w http.ResponseWriter, r *http.Request, prepared *PreparedOutput) WriteOutcome {
 	writer := &responseWriter{w: w, status: prepared.Status, headers: prepared.Headers, flush: prepared.Flush}
 	if flusher, ok := w.(http.Flusher); ok {
 		writer.flusher = flusher
 	}
-	return writer.run(r.Context(), prepared)
+	err := writer.run(r.Context(), prepared)
+	outcome := WriteOutcome{Written: writer.written}
+	if errors.Is(err, errAborted) {
+		outcome.Aborted = true
+		return outcome
+	}
+	outcome.Err = err
+	return outcome
 }
 
-// responseWriter 维护「是否已提交响应头」这一唯一状态。
+// responseWriter 维护「是否已提交响应头」这一唯一状态，并统计实际写入字节。
 type responseWriter struct {
 	w         http.ResponseWriter
 	flusher   http.Flusher
@@ -51,6 +69,7 @@ type responseWriter struct {
 	headers   map[string]string
 	flush     bool
 	committed bool
+	written   int64
 }
 
 // run 规划并执行传输操作。
@@ -86,7 +105,9 @@ func (w *responseWriter) run(ctx context.Context, prepared *PreparedOutput) erro
 			w.commitHeaders()
 		case opWrite:
 			w.commitHeaders()
-			if _, err := w.w.Write(op.data); err != nil {
+			written, err := w.w.Write(op.data)
+			w.written += int64(written)
+			if err != nil {
 				return err
 			}
 			if w.flush && w.flusher != nil {
@@ -222,7 +243,9 @@ func (w *responseWriter) writeStreamBytes(record []byte) error {
 		return nil
 	}
 	w.commitStreamHeaders()
-	if _, err := w.w.Write(record); err != nil {
+	written, err := w.w.Write(record)
+	w.written += int64(written)
+	if err != nil {
 		return err
 	}
 	if w.flush && w.flusher != nil {
@@ -370,7 +393,8 @@ func (w *responseWriter) abortConnection() error {
 			return err
 		}
 	}
-	return conn.Close()
+	_ = conn.Close()
+	return errAborted
 }
 
 // sleep 执行一次等待；无限等待持续到客户端取消或服务关闭。

@@ -33,11 +33,13 @@ func Routes(reg *model.Registry) []Route {
 	return routes
 }
 
-// NewRouter 注册全部剧本协议路由与兜底 404。方法不支持时由 handler 返回统一 JSON 405，
-// 不使用 Go 默认纯文本错误页。
+// NewRouter 注册全部剧本协议路由、管理接口与兜底 404。方法不支持时由 handler
+// 返回统一 JSON 405，不使用 Go 默认纯文本错误页。
 func NewRouter(loaded *service.Loaded) *http.ServeMux {
 	executor := service.NewExecutor(loaded)
+	admin := service.NewAdmin(loaded, executor.Counters, executor.Capture)
 	mux := http.NewServeMux()
+	registerAdmin(mux, admin)
 	for _, route := range Routes(loaded.Registry) {
 		route := route
 		mux.HandleFunc(route.Path, func(w http.ResponseWriter, r *http.Request) {
@@ -47,13 +49,16 @@ func NewRouter(loaded *service.Loaded) *http.ServeMux {
 					"method "+r.Method+" is not allowed; script routes only accept POST"))
 				return
 			}
-			result, ferr := executor.Execute(w, r, route.ScriptID, route.Protocol)
+			execution, ferr := executor.Execute(w, r, route.ScriptID, route.Protocol)
 			if ferr != nil {
 				writeError(w, ferr)
 				return
 			}
-			// 响应头可能已提交，写失败只可能是客户端断开，不再写错误 envelope。
-			_ = service.WriteOutput(w, r, result.Prepared)
+			// 活动租约覆盖到响应写完：wait 挂起与 abort 断连期间仍算活动请求
+			// （技术设计 §5.2），因此必须在 WriteOutput 之后才释放。
+			defer execution.Release()
+			outcome := service.WriteOutput(w, r, execution.Prepared)
+			execution.Finish(outcome)
 		})
 	}
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
