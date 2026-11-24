@@ -73,6 +73,27 @@ func (rec *requestRecorder) setOutputIndex(index int) {
 	})
 }
 
+// setConditions 记录 outputs.when 的逐候选条件求值结果（含未命中与 fallback）。
+func (rec *requestRecorder) setConditions(candidates []CandidateResult) {
+	if len(candidates) == 0 {
+		return
+	}
+	details := CandidatesDetails(candidates)
+	rec.update(func(r *CaptureRecord) {
+		r.Conditions = append(r.Conditions, details...)
+	})
+}
+
+// setSteps 记录 output.steps 的执行结果。
+func (rec *requestRecorder) setSteps(steps []any) {
+	if len(steps) == 0 {
+		return
+	}
+	rec.update(func(r *CaptureRecord) {
+		r.Steps = append(r.Steps, steps...)
+	})
+}
+
 // setAssertions 追加输入断言逐条求值结果（含失败项）。
 func (rec *requestRecorder) setAssertions(results []AssertionResult) {
 	if len(results) == 0 {

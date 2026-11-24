@@ -39,6 +39,8 @@ type WriteOutcome struct {
 	Written int64
 	Aborted bool
 	Err     error
+	// Steps 是 steps 执行诊断（流式按 step，非流式按展开后的传输操作）。
+	Steps []any
 }
 
 // errAborted 是 end.mode=abort 的内部哨兵：断连是剧本的正常结果，不是写失败。
@@ -52,7 +54,7 @@ func WriteOutput(w http.ResponseWriter, r *http.Request, prepared *PreparedOutpu
 		writer.flusher = flusher
 	}
 	err := writer.run(r.Context(), prepared)
-	outcome := WriteOutcome{Written: writer.written}
+	outcome := WriteOutcome{Written: writer.written, Steps: writer.steps}
 	if errors.Is(err, errAborted) {
 		outcome.Aborted = true
 		return outcome
@@ -61,7 +63,7 @@ func WriteOutput(w http.ResponseWriter, r *http.Request, prepared *PreparedOutpu
 	return outcome
 }
 
-// responseWriter 维护「是否已提交响应头」这一唯一状态，并统计实际写入字节。
+// responseWriter 维护「是否已提交响应头」这一唯一状态，并统计实际写入字节与步骤诊断。
 type responseWriter struct {
 	w         http.ResponseWriter
 	flusher   http.Flusher
@@ -70,6 +72,7 @@ type responseWriter struct {
 	flush     bool
 	committed bool
 	written   int64
+	steps     []any
 }
 
 // run 规划并执行传输操作。
@@ -93,29 +96,71 @@ func (w *responseWriter) run(ctx context.Context, prepared *PreparedOutput) erro
 		w.headers = cloneHeaders(w.headers)
 		w.headers[headerContentLength] = strconv.Itoa(total)
 	}
-	for _, op := range ops {
-		switch op.kind {
-		case opSleep:
-			if err := sleep(ctx, op); err != nil {
-				return err
-			}
-		case opAbort:
-			return w.abortConnection()
-		case opCommit:
-			w.commitHeaders()
-		case opWrite:
-			w.commitHeaders()
-			written, err := w.w.Write(op.data)
-			w.written += int64(written)
-			if err != nil {
-				return err
-			}
-			if w.flush && w.flusher != nil {
-				w.flusher.Flush()
-			}
+	for index, op := range ops {
+		start := time.Now()
+		before := w.written
+		err := w.runOp(ctx, op)
+		w.recordOp(index, op, start, before, err)
+		if err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// runOp 执行一个非流式传输操作。
+func (w *responseWriter) runOp(ctx context.Context, op writeOp) error {
+	switch op.kind {
+	case opSleep:
+		return sleep(ctx, op)
+	case opAbort:
+		return w.abortConnection()
+	case opCommit:
+		w.commitHeaders()
+	case opWrite:
+		w.commitHeaders()
+		written, err := w.w.Write(op.data)
+		w.written += int64(written)
+		if err != nil {
+			return err
+		}
+		if w.flush && w.flusher != nil {
+			w.flusher.Flush()
+		}
+	}
+	return nil
+}
+
+// recordOp 把非流式传输操作的执行结果追加到步骤诊断。
+func (w *responseWriter) recordOp(index int, op writeOp, start time.Time, before int64, err error) {
+	entry := map[string]any{
+		"index":       index,
+		"bytes":       w.written - before,
+		"duration_ms": time.Since(start).Milliseconds(),
+	}
+	switch op.kind {
+	case opSleep:
+		entry["op"] = "wait"
+		if op.infinite {
+			entry["infinite"] = true
+		}
+	case opAbort:
+		entry["op"] = "abort"
+	case opCommit:
+		entry["op"] = "commit"
+	case opWrite:
+		entry["op"] = "write"
+	}
+	switch {
+	case errors.Is(err, errAborted):
+		entry["result"] = "aborted"
+	case err != nil:
+		entry["result"] = "error"
+		entry["error"] = err.Error()
+	default:
+		entry["result"] = "ok"
+	}
+	w.steps = append(w.steps, entry)
 }
 
 // headerContentLength 是框架自行计算的保留 header 名（剧本不允许声明）。
@@ -125,64 +170,18 @@ const headerContentLength = "Content-Length"
 const ContentTypeSSE = "text/event-stream"
 
 // runStream 按 steps 顺序生成并写出协议记录：游标只前移，raw / heartbeat 不推进游标。
+// 每个 step 的字节数与耗时记入 capture 的步骤结果（steps）。
 func (w *responseWriter) runStream(ctx context.Context, prepared *PreparedOutput) error {
 	writer := newStreamWriter(prepared)
 	geometry := geometryOf(prepared)
 	for i := range prepared.Steps {
 		step := &prepared.Steps[i]
-		switch step.Op {
-		case OpWait:
-			if err := sleep(ctx, writeOp{kind: opSleep, duration: time.Duration(step.Duration), infinite: step.Infinite}); err != nil {
-				return err
-			}
-		case OpEnd:
-			if step.Mode == EndModeAbort {
-				return w.abortConnection()
-			}
-			w.commitStreamHeaders()
-			if w.flusher != nil {
-				w.flusher.Flush()
-			}
-			return nil
-		case OpSend:
-			if step.Target != nil && step.Target.Block == BlockHeaders {
-				w.commitStreamHeaders()
-				if w.flusher != nil {
-					w.flusher.Flush()
-				}
-				continue
-			}
-			switch step.Source {
-			case SourceRaw:
-				if err := w.sendStreamUnits(ctx, step, [][]byte{step.Raw}); err != nil {
-					return err
-				}
-			case SourceHeartbeat:
-				payload := heartbeatBytes(step, lineEndingBytes(prepared.LineEnding))
-				if err := w.sendStreamUnits(ctx, step, [][]byte{payload}); err != nil {
-					return err
-				}
-			case SourceError:
-				if err := w.sendStreamUnits(ctx, step, writer.streamErrorRecords()); err != nil {
-					return err
-				}
-			default:
-				bound := streamPos{stage: stageStreamEnd}
-				if step.Target != nil {
-					position, err := targetPosition(prepared.Protocol, geometry, step.Target)
-					if err != nil {
-						return err
-					}
-					bound = position
-				}
-				records, err := writer.advanceTo(bound)
-				if err != nil {
-					return err
-				}
-				if err := w.sendStreamUnits(ctx, step, records); err != nil {
-					return err
-				}
-			}
+		start := time.Now()
+		before := w.written
+		err := w.runStreamStep(ctx, prepared, writer, geometry, step)
+		w.recordStep(step, start, before, err)
+		if err != nil {
+			return err
 		}
 	}
 	w.commitStreamHeaders()
@@ -190,6 +189,81 @@ func (w *responseWriter) runStream(ctx context.Context, prepared *PreparedOutput
 		w.flusher.Flush()
 	}
 	return nil
+}
+
+// runStreamStep 执行单个 step。返回 errAborted 表示剧本主动断连（正常结果）。
+func (w *responseWriter) runStreamStep(ctx context.Context, prepared *PreparedOutput, writer *streamWriter, geometry streamGeometry, step *CompiledStep) error {
+	switch step.Op {
+	case OpWait:
+		return sleep(ctx, writeOp{kind: opSleep, duration: time.Duration(step.Duration), infinite: step.Infinite})
+	case OpEnd:
+		if step.Mode == EndModeAbort {
+			return w.abortConnection()
+		}
+		w.commitStreamHeaders()
+		if w.flusher != nil {
+			w.flusher.Flush()
+		}
+		return nil
+	case OpSend:
+		if step.Target != nil && step.Target.Block == BlockHeaders {
+			w.commitStreamHeaders()
+			if w.flusher != nil {
+				w.flusher.Flush()
+			}
+			return nil
+		}
+		switch step.Source {
+		case SourceRaw:
+			return w.sendStreamUnits(ctx, step, [][]byte{step.Raw})
+		case SourceHeartbeat:
+			payload := heartbeatBytes(step, lineEndingBytes(prepared.LineEnding))
+			return w.sendStreamUnits(ctx, step, [][]byte{payload})
+		case SourceError:
+			return w.sendStreamUnits(ctx, step, writer.streamErrorRecords())
+		default:
+			bound := streamPos{stage: stageStreamEnd}
+			if step.Target != nil {
+				position, err := targetPosition(prepared.Protocol, geometry, step.Target)
+				if err != nil {
+					return err
+				}
+				bound = position
+			}
+			records, err := writer.advanceTo(bound)
+			if err != nil {
+				return err
+			}
+			return w.sendStreamUnits(ctx, step, records)
+		}
+	}
+	return nil
+}
+
+// recordStep 把单个 step 的执行结果追加到步骤诊断。
+func (w *responseWriter) recordStep(step *CompiledStep, start time.Time, before int64, err error) {
+	entry := map[string]any{
+		"index":       step.Index,
+		"op":          step.Op,
+		"bytes":       w.written - before,
+		"duration_ms": time.Since(start).Milliseconds(),
+	}
+	if step.Source != "" {
+		entry["source"] = step.Source
+	}
+	if step.Target != nil {
+		entry["target"] = step.Target.Raw
+	}
+	switch {
+	case errors.Is(err, errAborted):
+		entry["result"] = "aborted"
+	case err != nil:
+		entry["result"] = "error"
+		entry["error"] = err.Error()
+	default:
+		entry["result"] = "ok"
+	}
+	w.steps = append(w.steps, entry)
 }
 
 // sendStreamUnits 把一次 send 的完整字节序列拆成最终发送单元：

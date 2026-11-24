@@ -19,7 +19,12 @@ import (
 // adminServer 启动一个真实 HTTP 服务，返回 base URL。
 func adminServer(t *testing.T, scripts map[string]string) string {
 	t.Helper()
-	router := newTestRouter(t, "", scripts)
+	return newServerFromRouter(t, newTestRouter(t, "", scripts))
+}
+
+// newServerFromRouter 用给定 router 启动真实 HTTP 服务，返回 base URL。
+func newServerFromRouter(t *testing.T, router http.Handler) string {
+	t.Helper()
 	server := httptest.NewServer(router)
 	t.Cleanup(server.Close)
 	return server.URL

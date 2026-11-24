@@ -26,10 +26,12 @@ func execute(executor *Executor, scriptID, protocol, body string) (int, *model.F
 		"openai": "chat/completions", "anthropic": "messages", "responses": "responses",
 	}[protocol]
 	request := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(body))
-	_, ferr := executor.Execute(rec, request, scriptID, protocol)
+	execution, ferr := executor.Execute(rec, request, scriptID, protocol)
 	if ferr != nil {
 		return ferr.Status, ferr
 	}
+	// 错误路径由 Execute 内部释放租约；成功路径必须由调用方在响应写完后释放。
+	execution.Release()
 	return http.StatusOK, nil
 }
 
@@ -231,6 +233,7 @@ rounds:
 	if ferr != nil {
 		t.Fatalf("unexpected error: %v", ferr)
 	}
+	defer result.Release()
 	if result.RequestCount != 1 || result.OutputIndex != 0 {
 		t.Fatalf("round-not-found must not consume count: count=%d output=%d", result.RequestCount, result.OutputIndex)
 	}
@@ -278,6 +281,7 @@ rounds:
 				t.Errorf("unexpected error: %v", ferr)
 				return
 			}
+			defer result.Release()
 			if result.RoundIndex != 1 {
 				t.Errorf("concurrent same request must stay on round 1, got %d", result.RoundIndex)
 			}

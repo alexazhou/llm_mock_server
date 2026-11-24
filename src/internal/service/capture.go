@@ -69,6 +69,15 @@ type Capture struct {
 	// evictedThrough 是已被淘汰的最大 sequence。cursor 落在它之前说明窗口缺过记录，
 	// verify 必须 fail closed 返回 capture_window_lost。
 	evictedThrough uint64
+	// finishHook 在记录结束时收到一份快照（锁外调用），用于 JSONL 诊断。
+	finishHook func(CaptureRecord)
+}
+
+// SetFinishHook 注册记录结束回调（单次启动期调用，之后只读）。
+func (c *Capture) SetFinishHook(hook func(CaptureRecord)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.finishHook = hook
 }
 
 // NewCapture 创建一个空窗口。配置校验已保证 capacity 与 max_total_bytes 为正整数，
@@ -144,16 +153,30 @@ func (c *Capture) SetBody(rec *CaptureRecord, body []byte, parsed any) {
 }
 
 // Finish 补齐请求结果面：result、框架错误、实际写入字节与结束原因。
+// 结束后在锁外把快照交给 finishHook（JSONL 诊断），避免持锁做 IO。
 func (c *Capture) Finish(rec *CaptureRecord, result string, ferr *model.FrameworkError, written int64, endReason string) {
 	if rec == nil {
 		return
 	}
+	var snapshot CaptureRecord
+	haveSnapshot := false
 	c.Update(rec, func(r *CaptureRecord) {
 		r.Result = result
 		r.FrameworkError = captureErrorOf(ferr)
 		r.WrittenBytes = written
 		r.EndReason = endReason
+		snapshot = cloneRecord(r)
+		haveSnapshot = true
 	})
+	if !haveSnapshot {
+		return
+	}
+	c.mu.Lock()
+	hook := c.finishHook
+	c.mu.Unlock()
+	if hook != nil {
+		hook(snapshot)
+	}
 }
 
 // Cursor 返回当前窗口的 sequence 游标（最近分配的 sequence）。

@@ -22,20 +22,39 @@ type Executor struct {
 	Capacity *Capacity
 	// Capture 是 capture 窗口；nil 表示不记录（单元测试可以省略）。
 	Capture *Capture
+	// Diagnostics 是固定 JSONL 诊断输出；nil 表示不输出。
+	Diagnostics *Diagnostics
 	// InstanceID 是本进程的实例标识，同时用于 capture cursor 校验。
 	InstanceID string
 }
 
+// Option 在构造执行器时注入可选能力（目前只有 JSONL 诊断）。
+type Option func(*Executor)
+
+// WithDiagnostics 开启固定 JSONL 诊断输出到 out。
+func WithDiagnostics(out io.Writer) Option {
+	return func(e *Executor) {
+		e.Diagnostics = NewDiagnostics(out)
+		if e.Diagnostics != nil {
+			e.Capture.SetFinishHook(e.Diagnostics.EmitRecord)
+		}
+	}
+}
+
 // NewExecutor 基于加载结果构建执行器，并创建本进程的 capture 窗口。
-func NewExecutor(loaded *Loaded) *Executor {
+func NewExecutor(loaded *Loaded, opts ...Option) *Executor {
 	instanceID := newInstanceID()
-	return &Executor{
+	executor := &Executor{
 		Loaded:     loaded,
 		Counters:   NewCounterStore(loaded.Registry),
 		Capacity:   NewCapacity(loaded.Resolved.MaxActiveRequests),
 		Capture:    NewCapture(instanceID, loaded.Resolved.CaptureCapacity, loaded.Resolved.CaptureMaxBodyBytes, loaded.Resolved.CaptureMaxTotalBytes),
 		InstanceID: instanceID,
 	}
+	for _, opt := range opts {
+		opt(executor)
+	}
+	return executor
 }
 
 // Execution 持有一次请求的活动租约：全局容量与剧本 active_requests 一直持有到
@@ -47,22 +66,32 @@ type Execution struct {
 	recorder *requestRecorder
 	release  func()
 	released bool
+	finished bool
 }
 
 // Release 释放容量与 active_requests；重复调用无副作用。
+// 若调用方漏了 Finish（例如单元测试只关心决策结果），这里补一条结束记录，
+// 避免 capture 里出现永远不结束的记录。
 func (x *Execution) Release() {
 	if x == nil || x.released {
 		return
 	}
 	x.released = true
+	if !x.finished {
+		x.Finish(WriteOutcome{})
+	}
 	if x.release != nil {
 		x.release()
 	}
 }
 
-// Finish 在响应写完后补齐 capture 记录的写入字节、结果分类与结束原因。
+// Finish 在响应写完后补齐 capture 记录的写入字节、结果分类、步骤诊断与结束原因。
 func (x *Execution) Finish(outcome WriteOutcome) {
-	if x == nil || x.recorder == nil {
+	if x == nil || x.finished {
+		return
+	}
+	x.finished = true
+	if x.recorder == nil {
 		return
 	}
 	result := "output"
@@ -75,6 +104,7 @@ func (x *Execution) Finish(outcome WriteOutcome) {
 		result = "client_cancel"
 		endReason = "client_disconnect"
 	}
+	x.recorder.setSteps(outcome.Steps)
 	x.recorder.finish(result, nil, outcome.Written, endReason)
 }
 
@@ -130,7 +160,9 @@ func (e *Executor) Execute(w http.ResponseWriter, r *http.Request, scriptID, pro
 		e.Capacity.Release()
 	}
 	// 失败路径统一收口：结束 capture 记录、释放租约后再返回。
+	// 先置 finished，避免 Release 再补一条「已完成」记录。
 	fail := func(ferr *model.FrameworkError) (*Execution, *model.FrameworkError) {
+		execution.finished = true
 		recorder.finish("framework_error", ferr, 0, ferr.Code)
 		execution.Release()
 		return nil, ferr
@@ -194,7 +226,9 @@ func (e *Executor) Execute(w http.ResponseWriter, r *http.Request, scriptID, pro
 	ctx.Count = &count
 	recorder.setRequestCount(count)
 
-	output, _, ferr := MatchOutput(ctx, round)
+	output, candidates, ferr := MatchOutput(ctx, round)
+	// 无论命中与否都记录逐候选条件的求值结果，便于定位「为什么没匹配上」。
+	recorder.setConditions(candidates)
 	if ferr != nil {
 		return fail(withBase(ferr, ctx))
 	}

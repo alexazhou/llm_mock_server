@@ -1,0 +1,245 @@
+package controller
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+// 本文件补充 D 阶段的捕获内容判据：条件结果、步骤结果、并发 header 归属。
+
+// whenScript 有两个候选 output：第一个按 request.count 条件匹配，第二个是 fallback。
+const whenScript = `version: 1
+id: when
+rounds:
+  - outputs:
+      - when:
+          - key: request.count
+            op: eq
+            expected: 1
+        content: first
+        steps:
+          - op: send
+          - op: end
+      - content: fallback
+        steps:
+          - op: send
+          - op: end
+`
+
+// TestCaptureRecordsConditionsAndSteps 锁定 capture 里的条件求值结果与步骤结果。
+func TestCaptureRecordsConditionsAndSteps(t *testing.T) {
+	base := adminServer(t, map[string]string{"when.yaml": whenScript})
+	resp, err := http.Post(base+"/mock/when/v1/chat/completions", "application/json", strings.NewReader(chatBody))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	var records []struct {
+		Conditions []map[string]any `json:"conditions"`
+		Steps      []map[string]any `json:"steps"`
+		Written    int64            `json:"written_bytes"`
+	}
+	if status := getJSON(t, base+"/_test/requests", &records); status != http.StatusOK {
+		t.Fatalf("requests status = %d", status)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+	record := records[0]
+	if len(record.Conditions) == 0 {
+		t.Fatal("capture must record outputs.when candidate evaluation results")
+	}
+	// 第一个候选命中，必须能看出 matched=true。
+	first := record.Conditions[0]
+	if matched, _ := first["matched"].(bool); !matched {
+		t.Fatalf("first candidate should match on request.count=1: %#v", first)
+	}
+	if len(record.Steps) == 0 {
+		t.Fatal("capture must record step execution results")
+	}
+	for _, step := range record.Steps {
+		if step["result"] != "ok" {
+			t.Fatalf("step should be ok: %#v", step)
+		}
+		if _, ok := step["bytes"]; !ok {
+			t.Fatalf("step must carry written bytes: %#v", step)
+		}
+	}
+	if record.Written <= 0 {
+		t.Fatalf("written_bytes must be positive for a successful response, got %d", record.Written)
+	}
+}
+
+// TestConcurrentCaptureKeepsHeaderOwnership 锁定并发请求下 capture 记录的 header 不串。
+func TestConcurrentCaptureKeepsHeaderOwnership(t *testing.T) {
+	base := adminServer(t, map[string]string{"hello.yaml": helloScript})
+
+	const workers = 24
+	var wait sync.WaitGroup
+	errs := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			marker := fmt.Sprintf("worker-%02d", index)
+			body := `{"model":"` + marker + `","messages":[{"role":"user","content":"hi"}]}`
+			request, err := http.NewRequest(http.MethodPost, base+"/mock/hello/v1/chat/completions", strings.NewReader(body))
+			if err != nil {
+				errs <- err
+				return
+			}
+			request.Header.Set("X-Worker", marker)
+			response, err := http.DefaultClient.Do(request)
+			if err != nil {
+				errs <- err
+				return
+			}
+			response.Body.Close()
+		}(i)
+	}
+	wait.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent request failed: %v", err)
+	}
+
+	var records []struct {
+		Body         string              `json:"body"`
+		Headers      map[string]string   `json:"headers"`
+		HeaderValues map[string][]string `json:"header_values"`
+	}
+	if status := getJSON(t, base+"/_test/requests", &records); status != http.StatusOK {
+		t.Fatalf("requests status = %d", status)
+	}
+	if len(records) != workers {
+		t.Fatalf("capture window should hold %d records, got %d", workers, len(records))
+	}
+	for _, record := range records {
+		worker := record.Headers["X-Worker"]
+		if worker == "" {
+			t.Fatalf("record missing X-Worker header: %#v", record.Headers)
+		}
+		if !strings.Contains(record.Body, `"model":"`+worker+`"`) {
+			t.Fatalf("header/body ownership mixed: header=%s body=%s", worker, record.Body)
+		}
+		values := record.HeaderValues["X-Worker"]
+		if len(values) != 1 || values[0] != worker {
+			t.Fatalf("header_values mismatch: %#v", record.HeaderValues)
+		}
+	}
+}
+
+// TestCaptureTruncatesBodyPerConfig 锁定 capture.max_body_bytes 的截断与标记。
+func TestCaptureTruncatesBodyPerConfig(t *testing.T) {
+	router := newTestRouter(t, "version: 1\nscripts_dir: scripts\ncapture:\n  max_body_bytes: 16\n",
+		map[string]string{"hello.yaml": helloScript})
+	server := newServerFromRouter(t, router)
+
+	resp, err := http.Post(server+"/mock/hello/v1/chat/completions", "application/json", strings.NewReader(chatBody))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	var records []struct {
+		Body          string `json:"body"`
+		BodyTruncated bool   `json:"body_truncated"`
+	}
+	getJSON(t, server+"/_test/requests", &records)
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+	if len(records[0].Body) != 16 || !records[0].BodyTruncated {
+		t.Fatalf("body must be truncated to 16 bytes with flag: len=%d truncated=%v",
+			len(records[0].Body), records[0].BodyTruncated)
+	}
+}
+
+// TestCaptureRequestsIsJSONArrayEvenWhenEmpty 锁定空窗口返回 [] 而不是 null。
+func TestCaptureRequestsIsJSONArrayEvenWhenEmpty(t *testing.T) {
+	base := adminServer(t, map[string]string{"hello.yaml": helloScript})
+	resp, err := http.Get(base + "/_test/requests")
+	if err != nil {
+		t.Fatalf("requests: %v", err)
+	}
+	defer resp.Body.Close()
+	var raw bytes.Buffer
+	if _, err := raw.ReadFrom(resp.Body); err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	trimmed := strings.TrimSpace(raw.String())
+	if trimmed != "[]" {
+		t.Fatalf("empty capture window must encode as [], got %q", trimmed)
+	}
+	var decoded []any
+	if err := json.Unmarshal(raw.Bytes(), &decoded); err != nil {
+		t.Fatalf("empty capture window must be valid JSON: %v", err)
+	}
+}
+
+// TestCaptureResultForAbortAndClientCancel 覆盖 abort 与客户端取消两条退出路径：
+// 两者都必须让 active_requests 归零，并在 capture 里留下可区分的结果分类。
+func TestCaptureResultForAbortAndClientCancel(t *testing.T) {
+	base := adminServer(t, map[string]string{
+		"abort.yaml": abortScript,
+		"hang.yaml":  hangScript,
+	})
+
+	// abort：meng 客端会收到连接重置，属于剧本的正常结果。
+	if response, err := http.Post(base+"/mock/abort/v1/chat/completions", "application/json",
+		strings.NewReader(chatBody)); err == nil {
+		response.Body.Close()
+	}
+	waitActiveRequests(t, base, "abort", 0)
+	waitResult(t, base, "abort", "aborted")
+
+	// 客户端取消：挂起中的请求被调用方放弃。
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			base+"/mock/hang/v1/chat/completions", strings.NewReader(chatBody))
+		if err != nil {
+			return
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err == nil {
+			response.Body.Close()
+		}
+	}()
+	waitActiveRequests(t, base, "hang", 1)
+	cancel()
+	<-done
+	waitActiveRequests(t, base, "hang", 0)
+	waitResult(t, base, "hang", "client_cancel")
+}
+
+// waitResult 轮询 capture 窗口，直到指定剧本出现期望的结果分类。
+func waitResult(t *testing.T, base, scriptID, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var records []struct {
+			ScriptID string `json:"script_id"`
+			Result   string `json:"result"`
+		}
+		if status := getJSON(t, base+"/_test/requests", &records); status == http.StatusOK {
+			for _, record := range records {
+				if record.ScriptID == scriptID && record.Result == want {
+					return
+				}
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("capture never recorded result %q for script %s", want, scriptID)
+}

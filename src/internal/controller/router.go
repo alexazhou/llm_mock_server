@@ -35,8 +35,8 @@ func Routes(reg *model.Registry) []Route {
 
 // NewRouter 注册全部剧本协议路由、管理接口与兜底 404。方法不支持时由 handler
 // 返回统一 JSON 405，不使用 Go 默认纯文本错误页。
-func NewRouter(loaded *service.Loaded) *http.ServeMux {
-	executor := service.NewExecutor(loaded)
+func NewRouter(loaded *service.Loaded, opts ...service.Option) *http.ServeMux {
+	executor := service.NewExecutor(loaded, opts...)
 	admin := service.NewAdmin(loaded, executor.Counters, executor.Capture)
 	mux := http.NewServeMux()
 	registerAdmin(mux, admin)
