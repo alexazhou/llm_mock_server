@@ -1,9 +1,11 @@
 package controller
 
 import (
-	"context"
+	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -229,20 +231,9 @@ func TestCounterResetSemantics(t *testing.T) {
 func TestResetRejectedWhileRequestIsActive(t *testing.T) {
 	base := adminServer(t, map[string]string{"hang.yaml": hangScript})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		request, err := http.NewRequestWithContext(ctx, http.MethodPost,
-			base+"/mock/hang/v1/chat/completions", strings.NewReader(chatBody))
-		if err != nil {
-			return
-		}
-		response, err := http.DefaultClient.Do(request)
-		if err == nil {
-			response.Body.Close()
-		}
-	}()
+	// 用裸 TCP 发起挂起请求：只读到响应头结束，不依赖 http.Client 在
+	// 「提交头但不写体」时的返回时机（不同 Go 版本/平台存在差异，CI 曾因此假红）。
+	conn := openHangingRequest(t, base, "hang")
 
 	waitActiveRequests(t, base, "hang", 1)
 
@@ -267,8 +258,10 @@ func TestResetRejectedWhileRequestIsActive(t *testing.T) {
 		t.Fatalf("batch reset during active request must be 409, got %d", status)
 	}
 
-	cancel()
-	<-done
+	// 关闭连接模拟客户端取消，租约必须随之释放。
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close hanging connection: %v", err)
+	}
 	waitActiveRequests(t, base, "hang", 0)
 
 	// 挂起结束、租约释放后 reset 才能成功。
@@ -280,19 +273,72 @@ func TestResetRejectedWhileRequestIsActive(t *testing.T) {
 // waitActiveRequests 轮询 counter.json，等到 active_requests 达到期望值。
 func waitActiveRequests(t *testing.T, base, scriptID string, want int64) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(waitTimeout)
+	lastStatus := 0
+	lastActive := int64(-1)
 	for time.Now().Before(deadline) {
 		var view struct {
 			ActiveRequests int64 `json:"active_requests"`
 		}
 		if status := getJSON(t, base+"/_test/scripts/"+scriptID+"/counter.json", &view); status == http.StatusOK {
+			lastActive = view.ActiveRequests
 			if view.ActiveRequests == want {
 				return
 			}
+		} else {
+			lastStatus = status
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("active_requests for %s never reached %d", scriptID, want)
+	t.Fatalf("active_requests for %s never reached %d (last status=%d last active=%d)",
+		scriptID, want, lastStatus, lastActive)
+}
+
+// waitTimeout 是活动租约判据的等待上限；CI 上 race + 低核数会比本地慢。
+const waitTimeout = 10 * time.Second
+
+// openHangingRequest 用裸 TCP 发起挂起剧本请求，并在读到响应头结束（空行）后返回连接。
+// 这条路径证明 send headers.end 已提交响应头、请求进入 wait；随后连接保持打开，
+// 活动租约必须一直持有到连接关闭。
+func openHangingRequest(t *testing.T, base, scriptID string) net.Conn {
+	t.Helper()
+	host := strings.TrimPrefix(base, "http://")
+	conn, err := net.DialTimeout("tcp", host, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial %s: %v", host, err)
+	}
+	payload := fmt.Sprintf("POST /mock/%s/v1/chat/completions HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s",
+		scriptID, host, len(chatBody), chatBody)
+	if _, err := conn.Write([]byte(payload)); err != nil {
+		_ = conn.Close()
+		t.Fatalf("write request to %s: %v", scriptID, err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(waitTimeout)); err != nil {
+		_ = conn.Close()
+		t.Fatalf("set read deadline: %v", err)
+	}
+	reader := bufio.NewReader(conn)
+	statusLine, err := reader.ReadString('\n')
+	if err != nil {
+		_ = conn.Close()
+		t.Fatalf("script %s never committed response headers: %v", scriptID, err)
+	}
+	if !strings.Contains(statusLine, "200") {
+		_ = conn.Close()
+		t.Fatalf("script %s status line = %q", scriptID, statusLine)
+	}
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			_ = conn.Close()
+			t.Fatalf("script %s headers incomplete: %v", scriptID, err)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+	return conn
 }
 
 // TestCaptureVerifyReportsFrameworkErrors 锁定 snapshot → verify 的区间校验：

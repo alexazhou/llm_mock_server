@@ -2,7 +2,6 @@ package controller
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -202,24 +201,13 @@ func TestCaptureResultForAbortAndClientCancel(t *testing.T) {
 	waitActiveRequests(t, base, "abort", 0)
 	waitResult(t, base, "abort", "aborted")
 
-	// 客户端取消：挂起中的请求被调用方放弃。
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		request, err := http.NewRequestWithContext(ctx, http.MethodPost,
-			base+"/mock/hang/v1/chat/completions", strings.NewReader(chatBody))
-		if err != nil {
-			return
-		}
-		response, err := http.DefaultClient.Do(request)
-		if err == nil {
-			response.Body.Close()
-		}
-	}()
+	// 客户端取消：挂起中的请求被调用方放弃。用裸 TCP 保证「已提交响应头」这一
+	// 前置条件可观测，不依赖 http.Client 在只发头时的返回时机。
+	conn := openHangingRequest(t, base, "hang")
 	waitActiveRequests(t, base, "hang", 1)
-	cancel()
-	<-done
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close hanging connection: %v", err)
+	}
 	waitActiveRequests(t, base, "hang", 0)
 	waitResult(t, base, "hang", "client_cancel")
 }
