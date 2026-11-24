@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -242,4 +243,124 @@ func waitResult(t *testing.T, base, scriptID, want string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("capture never recorded result %q for script %s", want, scriptID)
+}
+
+// upstreamScript 故意返回 503（剧本的正常结果），用于区分「剧本故意失败」与
+// 「Mock 自身断言失败」——verify 只能把后者报成框架错误。
+const upstreamScript = `version: 1
+id: upstream
+rounds:
+  - output:
+      config:
+        status: 503
+      error:
+        type: server_error
+        message: Mock upstream unavailable
+`
+
+// TestVerifyDistinguishesScriptFailureFromFrameworkError 锁定 D 的核心区分：
+// 剧本故意 503 不能让 verify 失败；自身断言失败必须让 verify 失败。
+func TestVerifyDistinguishesScriptFailureFromFrameworkError(t *testing.T) {
+	base := adminServer(t, map[string]string{
+		"upstream.yaml": upstreamScript,
+		"strict.yaml":   strictScript,
+	})
+
+	var snapshot struct {
+		InstanceID string `json:"instance_id"`
+		Cursor     uint64 `json:"cursor"`
+	}
+	getJSON(t, base+"/_test/capture/snapshot.json", &snapshot)
+
+	// 剧本故意 503。
+	resp, err := http.Post(base+"/mock/upstream/v1/chat/completions", "application/json", strings.NewReader(chatBody))
+	if err != nil {
+		t.Fatalf("upstream request: %v", err)
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("script must return its configured 503, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	verifyBody := `{"instance_id":"` + snapshot.InstanceID + `","cursor":` + itoa(snapshot.Cursor) + `}`
+	var report struct {
+		OK              bool `json:"ok"`
+		Records         int  `json:"records"`
+		FrameworkErrors []struct {
+			Code string `json:"code"`
+		} `json:"framework_errors"`
+	}
+	if status, raw := postJSON(t, base+"/_test/capture/verify.json", verifyBody, &report); status != http.StatusOK {
+		t.Fatalf("verify status = %d (%s)", status, raw)
+	}
+	if !report.OK || len(report.FrameworkErrors) != 0 {
+		t.Fatalf("script-level 503 must not be a framework error: %#v", report)
+	}
+	if report.Records != 1 {
+		t.Fatalf("verify must count the script request, got %d", report.Records)
+	}
+
+	// 同一区间内再制造一次自身断言失败 ⇒ verify 必须失败。
+	resp, err = http.Post(base+"/mock/strict/v1/chat/completions", "application/json", strings.NewReader(chatBody))
+	if err != nil {
+		t.Fatalf("strict request: %v", err)
+	}
+	resp.Body.Close()
+	if status, raw := postJSON(t, base+"/_test/capture/verify.json", verifyBody, &report); status != http.StatusOK {
+		t.Fatalf("verify status = %d (%s)", status, raw)
+	}
+	if report.OK || len(report.FrameworkErrors) != 1 {
+		t.Fatalf("framework error must fail verify: %#v", report)
+	}
+
+	// script_ids 过滤只看 strict。
+	filtered := `{"instance_id":"` + snapshot.InstanceID + `","cursor":` + itoa(snapshot.Cursor) + `,"script_ids":["upstream"]}`
+	var onlyUpstream struct {
+		OK      bool `json:"ok"`
+		Records int  `json:"records"`
+	}
+	if status, raw := postJSON(t, base+"/_test/capture/verify.json", filtered, &onlyUpstream); status != http.StatusOK {
+		t.Fatalf("verify(filtered) status = %d (%s)", status, raw)
+	}
+	if !onlyUpstream.OK || onlyUpstream.Records != 1 {
+		t.Fatalf("script_ids filter must ignore other scripts: %#v", onlyUpstream)
+	}
+}
+
+// TestCounterUnknownScriptIsRejected 锁定未知剧本 id 的 counter 查询与 reset。
+func TestCounterUnknownScriptIsRejected(t *testing.T) {
+	base := adminServer(t, map[string]string{"hello.yaml": helloScript})
+	if status, raw := postJSON(t, base+"/_test/scripts/nope/counter.json", "", nil); status != http.StatusMethodNotAllowed {
+		t.Fatalf("GET-shaped POST should be 405, got %d (%s)", status, raw)
+	}
+	var envelope map[string]any
+	if status := getJSONStatus(t, base+"/_test/scripts/nope/counter.json", &envelope); status != http.StatusBadRequest {
+		t.Fatalf("unknown script counter must be 400, got %d", status)
+	}
+	if status, _ := postJSON(t, base+"/_test/scripts/nope/counter/reset.json", "", nil); status != http.StatusBadRequest {
+		t.Fatalf("unknown script reset must be 400, got %d", status)
+	}
+	if status, _ := postJSON(t, base+"/_test/counters/reset.json", `{"script_ids":["nope"]}`, nil); status != http.StatusBadRequest {
+		t.Fatalf("batch reset with unknown script must be 400, got %d", status)
+	}
+}
+
+// getJSONStatus 与 getJSON 相同，但允许非 200 响应（便于断言错误码）。
+func getJSONStatus(t *testing.T, url string, target any) int {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read %s: %v", url, err)
+	}
+	if target != nil {
+		if err := json.Unmarshal(body, target); err != nil {
+			t.Fatalf("decode %s: %v (body=%s)", url, err, body)
+		}
+	}
+	return resp.StatusCode
 }
