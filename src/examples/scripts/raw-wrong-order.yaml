@@ -1,0 +1,15 @@
+version: 1
+id: raw-wrong-order
+# raw 输出示例：事件顺序故意颠倒（先 delta 后 start、缺结束标记），
+# 用于验证调用方对乱序流的处理。
+config:
+  stream: true
+  line_ending: lf
+rounds:
+  - output:
+      content: 占位正文（raw 剧本不会用到它）
+      steps:
+        - op: send
+          source: raw
+          text: "data: {\"delta\":\"content\"}\n\ndata: {\"event\":\"message_start\"}\n\n"
+        - op: end

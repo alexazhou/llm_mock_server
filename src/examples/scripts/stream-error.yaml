@@ -1,0 +1,15 @@
+version: 1
+id: stream-error
+# 流式 error 事件示例：HTTP 200 建立流后，用 source=error 发送协议级错误事件再结束。
+config:
+  stream: true
+rounds:
+  - output:
+      error:
+        type: server_error
+        code: stream_interrupted
+        message: The stream was interrupted by the upstream
+      steps:
+        - op: send
+          source: error
+        - op: end

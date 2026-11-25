@@ -1,0 +1,12 @@
+version: 1
+id: eof-mid-output
+# 异常传输：只发到 content[:5] 就正常结束连接 ⇒ 流不完整（缺结束标记）但 TCP 正常 FIN。
+config:
+  stream: true
+rounds:
+  - output:
+      content: 这段正文只会发出一半
+      steps:
+        - op: send
+          target: content[:5]
+        - op: end

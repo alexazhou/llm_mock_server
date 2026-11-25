@@ -1,0 +1,13 @@
+version: 1
+id: hang-after-headers
+# 异常传输：先提交响应头，然后无限等待 ⇒ 客户端拿到 200 与头，但 body 永不结束。
+config:
+  stream: true
+rounds:
+  - output:
+      content: 只提交响应头，body 挂起。
+      steps:
+        - op: send
+          target: headers.end
+        - op: wait
+          duration: infinite

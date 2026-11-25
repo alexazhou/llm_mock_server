@@ -40,6 +40,7 @@ func NewRouter(loaded *service.Loaded, opts ...service.Option) *http.ServeMux {
 	admin := service.NewAdmin(loaded, executor.Counters, executor.Capture)
 	mux := http.NewServeMux()
 	registerAdmin(mux, admin)
+	registerModels(mux)
 	for _, route := range Routes(loaded.Registry) {
 		route := route
 		mux.HandleFunc(route.Path, func(w http.ResponseWriter, r *http.Request) {

@@ -1,0 +1,12 @@
+version: 1
+id: hang-after-complete
+# 异常传输：完整协议已发完，但连接不关闭 ⇒ 客户端收得到完整流却等不到 EOF。
+config:
+  stream: true
+rounds:
+  - output:
+      content: 协议完整，但连接不结束。
+      steps:
+        - op: send
+        - op: wait
+          duration: infinite

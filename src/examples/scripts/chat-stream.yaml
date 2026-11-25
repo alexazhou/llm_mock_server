@@ -1,0 +1,22 @@
+version: 1
+id: chat-stream
+# 三协议单轮流式示例：显式 stream: true 强制流式，文本按固定 5 个 code point 切 delta。
+config:
+  max_body_bytes: 8388608
+  read_body_timeout: 15s
+  status: 200
+  stream: true
+  line_ending: crlf
+  headers:
+    Cache-Control: no-cache
+  usage:
+    input_tokens: 8
+    output_tokens: 12
+assert:
+  - name: stream_flag
+    key: request.stream
+    op: eq
+    expected: true
+rounds:
+  - output:
+      content: 你好，我是 Mock Server。

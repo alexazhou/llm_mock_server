@@ -1,0 +1,13 @@
+version: 1
+id: missing-message-stop
+# 缺结束标记（Anthropic）：走 /v1/messages 时停在 generation.end ⇒ 缺 message_stop。
+# 与 missing-done 结构相同，单独一份便于按协议挑选示例。
+config:
+  stream: true
+rounds:
+  - output:
+      content: 缺 message_stop 标记。
+      steps:
+        - op: send
+          target: generation.end
+        - op: end

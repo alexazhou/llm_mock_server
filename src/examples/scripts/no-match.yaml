@@ -1,0 +1,13 @@
+version: 1
+id: no-match
+# 无匹配诊断示例：唯一的候选带 when，请求不带 tools 时没有任何候选匹配，
+# 框架返回 mock_output_not_found，并在诊断里列出每个候选的条件求值结果。
+rounds:
+  - outputs:
+      - when:
+          - name: has_tools
+            key: request.json_body
+            path: $.tools
+            op: length_gte
+            expected: 1
+        content: 有工具时的回答。
